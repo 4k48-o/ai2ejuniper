@@ -1,4 +1,10 @@
-"""Hotel search tool for LangGraph agent."""
+"""Hotel search tool for LangGraph agent.
+
+Static/SOAP cut-over:
+- **PostgreSQL (L1)**: destination → zone `code` via ``get_zone_code`` / ``get_zone_candidates``
+  (no SOAP).
+- **Juniper SOAP**: availability and prices via ``hotel_avail`` only.
+"""
 
 import logging
 

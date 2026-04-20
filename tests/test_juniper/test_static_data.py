@@ -1,11 +1,15 @@
 """Tests for static data sync and zone code lookup."""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from juniper_ai.app.juniper.static_data import (
+    expand_zone_jpdcodes,
+    explain_catalog_lookup,
     get_zone_code,
     get_zone_candidates,
+    list_hotels_in_zone_jpdcodes,
+    resolve_destination,
     sync_catalogue,
     sync_hotels,
     sync_zones,
@@ -256,6 +260,84 @@ async def test_mock_client_generic_data_catalogue():
     assert any(c["code"] == "EUR" for c in currencies)
     assert len(countries) > 0
     assert any(c["code"] == "ES" for c in countries)
+
+
+@pytest.mark.asyncio
+async def test_resolve_destination_unique_via_get_zone_code():
+    """When get_zone_code finds a match, status is unique."""
+    with patch("juniper_ai.app.juniper.static_data.get_zone_code", new_callable=AsyncMock) as gz:
+        gz.return_value = {"jpdcode": "JPD1", "code": "100", "name": "Test City", "area_type": "CTY"}
+        out = await resolve_destination(AsyncMock(), "Test City", limit=5)
+    assert out["status"] == "unique"
+    assert out["best"]["code"] == "100"
+
+
+@pytest.mark.asyncio
+async def test_resolve_destination_ambiguous():
+    with patch("juniper_ai.app.juniper.static_data.get_zone_code", new_callable=AsyncMock, return_value=None), \
+         patch("juniper_ai.app.juniper.static_data.get_zone_candidates", new_callable=AsyncMock) as gc:
+        gc.return_value = [
+            {"jpdcode": "JPD_A", "code": "1", "name": "Foo East", "area_type": "BAR"},
+            {"jpdcode": "JPD_B", "code": "2", "name": "Foo City", "area_type": "CTY"},
+        ]
+        out = await resolve_destination(AsyncMock(), "Foo", limit=8)
+    assert out["status"] == "ambiguous"
+    assert len(out["candidates"]) == 2
+    # CTY should sort before BAR
+    assert out["candidates"][0]["area_type"] == "CTY"
+
+
+@pytest.mark.asyncio
+async def test_expand_zone_jpdcodes_fetchall():
+    mock_db = AsyncMock()
+    rm = MagicMock()
+    rm.fetchall.return_value = [("JPD_ROOT",), ("JPD_CHILD",)]
+    mock_db.execute = AsyncMock(return_value=rm)
+    out = await expand_zone_jpdcodes(mock_db, ["JPD_ROOT"])
+    assert set(out) == {"JPD_ROOT", "JPD_CHILD"}
+    mock_db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_expand_zone_jpdcodes_empty_roots():
+    mock_db = AsyncMock()
+    assert await expand_zone_jpdcodes(mock_db, []) == []
+    assert await expand_zone_jpdcodes(mock_db, ["", "   "]) == []
+    mock_db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_explain_catalog_lookup_board():
+    mock_db = AsyncMock()
+    row = MagicMock()
+    row.code = "AD"
+    row.name = "Breakfast"
+    mock_db.get = AsyncMock(return_value=row)
+    out = await explain_catalog_lookup(mock_db, "board", "AD")
+    assert out["name"] == "Breakfast"
+
+
+@pytest.mark.asyncio
+async def test_list_hotels_in_zone_jpdcodes_respects_limit():
+    h1 = MagicMock()
+    h1.jp_code = "JP1"
+    h1.name = "H1"
+    h1.zone_jpdcode = "Z1"
+    h1.category_type = ""
+    h1.city_name = ""
+
+    with patch("juniper_ai.app.juniper.static_data.expand_zone_jpdcodes", new_callable=AsyncMock) as ex:
+        ex.return_value = ["Z1"]
+        mock_db = AsyncMock()
+        result_mock = MagicMock()
+        result_mock.scalars.return_value.all.return_value = [h1]
+        mock_db.execute = AsyncMock(return_value=result_mock)
+        payload = await list_hotels_in_zone_jpdcodes(
+            mock_db, ["ZROOT"], limit=5, offset=0, expand_descendants=True,
+        )
+    assert len(payload["hotels"]) == 1
+    assert payload["hotels"][0]["jp_code"] == "JP1"
+    assert payload["has_more"] is False
 
 
 @pytest.mark.asyncio

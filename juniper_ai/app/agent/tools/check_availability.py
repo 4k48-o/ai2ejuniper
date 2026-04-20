@@ -1,4 +1,8 @@
-"""Hotel availability check tool."""
+"""Hotel availability check tool.
+
+This tool is **SOAP-only** (HotelCheckAvail). Local static cache is not used:
+rate plans and prices must come from Juniper live responses.
+"""
 
 import logging
 

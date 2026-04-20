@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from datetime import date, datetime, timezone
 from typing import Any
 
 from juniper_ai.app.config import settings
@@ -22,6 +23,56 @@ from juniper_ai.app.juniper.serializers import (
 )
 
 logger = logging.getLogger(__name__)
+
+# WebServiceJP.asmx exposes multiple SOAP ports; zeep's default `client.service` is not Avail/Static.
+_JP_SERVICE = "WebServiceJP"
+_STATIC_PORT = "StaticDataTransactions"
+_AVAIL_PORT = "AvailTransactions"
+_BOOK_PORT = "BookTransactions"
+_CHECK_PORT = "CheckTransactions"
+
+_STATIC_OPS = frozenset({
+    "ZoneList",
+    "HotelPortfolio",
+    "HotelContent",
+    "HotelCatalogueData",
+    "GenericDataCatalogue",
+    "HotelList",
+})
+_AVAIL_OPS = frozenset({
+    "HotelAvail",
+    "HotelAvailCalendar",
+    "HotelFutureRates",
+})
+_BOOK_OPS = frozenset({
+    "CancelBooking",
+    "HotelBooking",
+    "HotelConfirmModify",
+    "HotelModify",
+    "ReadBooking",
+})
+_CHECK_OPS = frozenset({
+    "HotelBookingRules",
+    "HotelCheckAvail",
+})
+_RQ_WRAPPERS: dict[str, str] = {
+    "ZoneList": "ZoneListRQ",
+    "HotelPortfolio": "HotelPortfolioRQ",
+    "HotelContent": "HotelContentRQ",
+    "HotelCatalogueData": "HotelCatalogueDataRQ",
+    "GenericDataCatalogue": "GenericDataCatalogueRQ",
+    "HotelList": "HotelListRQ",
+    "HotelAvail": "HotelAvailRQ",
+    "HotelAvailCalendar": "HotelAvailCalendarRQ",
+    "HotelFutureRates": "HotelFutureRatesRQ",
+    "HotelBookingRules": "HotelBookingRulesRQ",
+    "HotelCheckAvail": "HotelCheckAvailRQ",
+    "HotelBooking": "HotelBookingRQ",
+    "ReadBooking": "ReadRQ",
+    "CancelBooking": "CancelRQ",
+    "HotelModify": "HotelModifyRQ",
+    "HotelConfirmModify": "HotelConfirmModifyRQ",
+}
 
 SOAP_TIMEOUT = 30  # seconds
 MAX_RETRIES = 2
@@ -49,7 +100,9 @@ class JuniperClient(HotelSupplier):
                 "Content-Type": "text/xml;charset=UTF-8",
             })
             transport = Transport(timeout=SOAP_TIMEOUT, operation_timeout=SOAP_TIMEOUT, session=session)
-            wsdl_url = f"{settings.juniper_api_url}/WebService/JP_HotelAvail.asmx?WSDL"
+            # Flicknmix / xml-uat: JP/WebServiceJP.asmx (supersedes legacy JP_HotelAvail.asmx path on other hosts)
+            base = settings.juniper_api_url.rstrip("/")
+            wsdl_url = f"{base}/webservice/JP/WebServiceJP.asmx?WSDL"
             self._client = Client(wsdl_url, transport=transport)
             self._initialized = True
             logger.info("Juniper SOAP client initialized: %s", settings.juniper_api_url)
@@ -60,13 +113,143 @@ class JuniperClient(HotelSupplier):
     def _login_element(self) -> dict:
         return {"Email": settings.juniper_email, "Password": settings.juniper_password}
 
+    @staticmethod
+    def _base_header_fields() -> dict[str, str]:
+        # Juniper WebServiceJP headers expected in each *RQ object.
+        return {"Version": "1.1", "Language": "en"}
+
+    @staticmethod
+    def _operation_header_fields(operation_name: str) -> dict[str, Any]:
+        # Some request types define TimeStamp and zeep needs an explicit datetime value.
+        with_timestamp = {"HotelAvail", "HotelFutureRates", "HotelCheckAvail", "HotelBookingRules"}
+        if operation_name in with_timestamp:
+            return {"TimeStamp": datetime.now(timezone.utc)}
+        return {}
+
+    @staticmethod
+    def _raise_if_response_errors(operation_name: str, response: Any) -> None:
+        errors = getattr(response, "Errors", None)
+        if not errors:
+            return
+        error_list = getattr(errors, "Error", None) or []
+        if not isinstance(error_list, list):
+            error_list = [error_list]
+        if not error_list:
+            return
+        first = error_list[0]
+        code = str(getattr(first, "Code", "SOAP_RESPONSE_ERROR") or "SOAP_RESPONSE_ERROR")
+        text = str(getattr(first, "Text", "") or f"{operation_name} returned response errors")
+        raise JuniperFaultError(code, text)
+
+    def _normalize_operation_kwargs(self, operation_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Convert legacy internal kwargs into WebServiceJP *RQ payload fields."""
+        if operation_name == "ZoneList":
+            return {"ZoneListRequest": kwargs.get("ZoneListRequest", {})}
+
+        if operation_name == "HotelPortfolio":
+            return kwargs
+
+        if operation_name == "HotelContent":
+            return {"HotelContentList": kwargs.get("HotelContentList", {})}
+
+        if operation_name == "HotelCatalogueData":
+            return {}
+
+        if operation_name == "GenericDataCatalogue":
+            return {"GenericDataCatalogueRequest": kwargs.get("GenericDataCatalogueRequest", {})}
+
+        if operation_name == "HotelList":
+            return {"HotelListRequest": kwargs.get("HotelListRequest", {})}
+
+        if operation_name == "HotelAvail":
+            payload = {
+                "Paxes": kwargs.get("Paxes", {}),
+                "HotelRequest": kwargs.get("HotelRequest", {}),
+            }
+            if "AdvancedOptions" in kwargs:
+                payload["AdvancedOptions"] = kwargs["AdvancedOptions"]
+            return payload
+
+        if operation_name == "HotelCheckAvail":
+            rate_plan_code = kwargs.get("RatePlanCode", "")
+            return {"HotelCheckAvailRequest": {"HotelOption": {"RatePlanCode": rate_plan_code}}}
+
+        if operation_name == "HotelBookingRules":
+            rate_plan_code = kwargs.get("RatePlanCode", "")
+            return {"HotelBookingRulesRequest": {"HotelOption": {"RatePlanCode": rate_plan_code}}}
+
+        if operation_name == "HotelBooking":
+            booking_code = kwargs.get("BookingCode", "")
+            rate_plan_code = kwargs.get("RatePlanCode", "")
+            payload: dict[str, Any] = {
+                "Holder": kwargs.get("Holder", {}),
+                "Paxes": kwargs.get("Paxes", {}),
+                "Elements": {"HotelElement": {"BookingCode": booking_code or rate_plan_code}},
+            }
+            external_ref = kwargs.get("ExternalBookingReference")
+            if external_ref:
+                payload["ExternalBookingReference"] = external_ref
+            return payload
+
+        if operation_name == "ReadBooking":
+            return {"ReadRequest": {"ReservationLocator": kwargs.get("Locator", "")}}
+
+        if operation_name == "CancelBooking":
+            payload: dict[str, Any] = {"CancelRequest": {"ReservationLocator": kwargs.get("Locator", "")}}
+            if kwargs.get("OnlyCancellationFees") is not None:
+                payload["CancelRequest"]["OnlyCancellationFees"] = kwargs["OnlyCancellationFees"]
+            return payload
+
+        if operation_name == "HotelModify":
+            payload: dict[str, Any] = {"ReservationLocator": kwargs.get("Locator", "")}
+            if kwargs.get("Start") or kwargs.get("End"):
+                payload["SearchSementHotels"] = {
+                    "Start": kwargs.get("Start"),
+                    "End": kwargs.get("End"),
+                }
+            return payload
+
+        if operation_name == "HotelConfirmModify":
+            return {"ReservationLocator": kwargs.get("ModifyCode", "")}
+
+        return kwargs
+
+    @staticmethod
+    def _parse_iso_date(value: str) -> date:
+        return date.fromisoformat(value)
+
+    @staticmethod
+    def _port_for_operation(operation_name: str) -> str:
+        if operation_name in _STATIC_OPS:
+            return _STATIC_PORT
+        if operation_name in _AVAIL_OPS:
+            return _AVAIL_PORT
+        if operation_name in _BOOK_OPS:
+            return _BOOK_PORT
+        if operation_name in _CHECK_OPS:
+            return _CHECK_PORT
+        raise ValueError(f"Unknown Juniper SOAP operation for port routing: {operation_name}")
+
     def _call_sync(self, operation_name: str, **kwargs) -> Any:
         """Synchronous SOAP call (runs in thread pool)."""
         self._ensure_client()
         try:
-            service = self._client.service
+            port = self._port_for_operation(operation_name)
+            service = self._client.bind(_JP_SERVICE, port)
             operation = getattr(service, operation_name)
-            return operation(Login=self._login_element(), **kwargs)
+            rq_wrapper = _RQ_WRAPPERS.get(operation_name)
+            if not rq_wrapper:
+                raise ValueError(f"No RQ wrapper configured for Juniper operation: {operation_name}")
+            normalized = self._normalize_operation_kwargs(operation_name, kwargs)
+            request_payload = {
+                "Login": self._login_element(),
+                **self._base_header_fields(),
+                **self._operation_header_fields(operation_name),
+                **normalized,
+            }
+            response = operation(**{rq_wrapper: request_payload})
+            self._raise_if_response_errors(operation_name, response)
+            return response
         except Exception as e:
             error_str = str(e).lower()
             if "timeout" in error_str:
@@ -236,20 +419,37 @@ class JuniperClient(HotelSupplier):
         for i in range(children):
             paxes.append({"IdPax": adults + i + 1, "Age": 8})
 
-        search_segment = {
-            "Start": check_in,
-            "End": check_out,
-            "DestinationZone": zone_code,
+        search_segment_base: dict[str, Any] = {
+            "Start": self._parse_iso_date(check_in),
+            "End": self._parse_iso_date(check_out),
         }
+        if str(zone_code).upper().startswith("JPD"):
+            search_segment_base["JPDCode"] = str(zone_code).upper()
+        else:
+            search_segment_base["DestinationZone"] = int(zone_code)
+        # JP_SearchSegmentHotels inherits JP_SearchSegmentBase; zeep needs both
+        # explicit attrs and the base payload to serialize reliably.
+        search_segment = {
+            "_value_1": search_segment_base,
+            **search_segment_base,
+        }
+
+        search_segments_hotels: dict[str, Any] = {"SearchSegmentHotels": search_segment}
         if country_of_residence:
-            search_segment["CountryOfResidence"] = country_of_residence
+            search_segments_hotels["CountryOfResidence"] = country_of_residence
 
         response = await self._call_with_retry(
             "HotelAvail",
+            Paxes={"Pax": paxes},
             HotelRequest={
-                "SearchSegmentsHotels": {"SearchSegmentHotels": search_segment},
-                "Paxes": {"Pax": paxes},
+                "SearchSegmentsHotels": search_segments_hotels,
+                "RelPaxesDist": {
+                    "RelPaxDist": [{
+                        "RelPaxes": {"RelPax": [{"IdPax": pax["IdPax"]} for pax in paxes]},
+                    }],
+                },
             },
+            AdvancedOptions={"TimeOut": 15000},
         )
         hotels = serialize_hotel_avail(response)
         if not hotels:

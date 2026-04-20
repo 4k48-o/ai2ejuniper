@@ -7,8 +7,8 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 10
 
-    # Juniper API
-    juniper_api_url: str = "https://juniper-uat.bookingengine.es"
+    # Juniper API — default host matches Flicknmix / xml-uat (see scripts/test_juniper_sandbox.py)
+    juniper_api_url: str = "https://xml-uat.bookingengine.es"
     juniper_email: str = ""
     juniper_password: str = ""
     juniper_use_mock: bool = True

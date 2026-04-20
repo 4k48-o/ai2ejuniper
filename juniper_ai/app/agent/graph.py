@@ -19,12 +19,20 @@ from juniper_ai.app.agent.tools.list_bookings import list_bookings
 from juniper_ai.app.agent.tools.modify_booking import modify_booking
 from juniper_ai.app.agent.tools.read_booking import read_booking
 from juniper_ai.app.agent.tools.search_hotels import search_hotels
+from juniper_ai.app.agent.tools.static_lookup_tools import (
+    explain_catalog,
+    list_hotels_for_zones,
+    resolve_destination,
+)
 from juniper_ai.app.config import settings
 from juniper_ai.app.llm.client import get_llm_client
 
 logger = logging.getLogger(__name__)
 
 ALL_TOOLS = [
+    resolve_destination,
+    list_hotels_for_zones,
+    explain_catalog,
     search_hotels,
     check_availability,
     get_booking_rules,

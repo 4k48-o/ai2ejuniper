@@ -79,7 +79,12 @@ def build_system_prompt(preferences: dict | None = None, language: str = "zh") -
 - 状态: 已确认
 ```
 
+## 静态数据工具 vs 预订工具（重要）
+- **仅本地数据库（无 SOAP）**: `resolve_destination`、`list_hotels_for_zones`、`explain_catalog` — 用于澄清目的地、列出缓存中的酒店代码、解释餐食/星级/国家/货币码。**不能**代表库存、房价或可订状态。
+- **Juniper 实时接口**: `search_hotels`、`check_availability`、`get_booking_rules`、`book_hotel` 等 — 获取可用性、价格、规则与下单。**最终对客展示**（尤其下单前酒店名、地址、星级）必须以 **HotelBookingRules / HotelBooking** 的响应为准；不得仅用缓存字段替代。
+
 ## 工具使用规则
+- 目的地模糊时，可先用 `resolve_destination` 再调用 `search_hotels`；需要向用户展示「本地目录中有哪些酒店」时可用 `list_hotels_for_zones`（仍须用 `search_hotels` 查实时房态）。
 - 需要搜索酒店、查看可用性或预订时，必须调用对应的工具，严禁编造酒店名称、价格或预订确认信息。
 - 工具返回错误时，用友好的语言告知用户并建议替代方案，不要暴露技术错误详情。
 - 如果搜索没有结果，建议用户调整搜索条件（换日期、换目的地、放宽偏好）。"""

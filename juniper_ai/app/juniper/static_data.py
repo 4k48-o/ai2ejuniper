@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, bindparam, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +13,6 @@ from juniper_ai.app.db.models import (
     Currency,
     HotelCache,
     HotelCategory,
-    HotelContentCache,
     Zone,
 )
 from juniper_ai.app.juniper.supplier import HotelSupplier
@@ -195,10 +194,10 @@ async def get_zone_code(db: AsyncSession, destination_text: str) -> dict | None:
 
 async def get_zone_candidates(db: AsyncSession, destination_text: str, limit: int = 10) -> list[dict]:
     """Return multiple zone matches for disambiguation."""
-    text = destination_text.strip()
+    raw = destination_text.strip()
     result = await db.execute(
         select(Zone).where(
-            Zone.name.ilike(f"%{text}%"),
+            Zone.name.ilike(f"%{raw}%"),
             Zone.searchable.is_(True),
         ).order_by(Zone.area_type)
         .limit(limit)
@@ -207,6 +206,177 @@ async def get_zone_candidates(db: AsyncSession, destination_text: str, limit: in
         {"jpdcode": z.jpdcode, "code": z.code, "name": z.name, "area_type": z.area_type}
         for z in result.scalars().all()
     ]
+
+
+def _area_type_sort_key(area_type: str | None) -> tuple[int, str]:
+    """Prefer city-level zones, then stable name ordering for disambiguation."""
+    rank = {"CTY": 0, "BAR": 1, "REG": 2, "PAS": 3, "CTI": 4}
+    at = (area_type or "").strip().upper()
+    return (rank.get(at, 9), at)
+
+
+async def resolve_destination(db: AsyncSession, destination_text: str, limit: int = 8) -> dict:
+    """Structured destination resolution for Agent tools (DB only).
+
+    Returns:
+        status: "unique" | "ambiguous" | "none"
+        best: single zone dict or None
+        candidates: sorted list of {jpdcode, code, name, area_type, hint}
+    """
+    raw = (destination_text or "").strip()
+    if not raw:
+        return {"status": "none", "query": raw, "best": None, "candidates": [], "hint": "Empty destination text."}
+
+    best = await get_zone_code(db, raw)
+    if best:
+        cand = {**best, "hint": "Use this zone's `code` as destination zone for search_hotels (SOAP)."}
+        return {"status": "unique", "query": raw, "best": best, "candidates": [cand], "hint": None}
+
+    raw_list = await get_zone_candidates(db, raw, limit=max(limit * 3, 24))
+    if not raw_list:
+        return {
+            "status": "none",
+            "query": raw,
+            "best": None,
+            "candidates": [],
+            "hint": "No searchable zones matched. Try another spelling or broader region name.",
+        }
+
+    scored = sorted(
+        raw_list,
+        key=lambda z: (_area_type_sort_key(z.get("area_type")), len(z.get("name", "")), z.get("name", "")),
+    )[:limit]
+
+    candidates = []
+    for z in scored:
+        hint = (
+            f"Area type {z.get('area_type', '')}; jpdcode={z.get('jpdcode', '')}. "
+            "If multiple rows, ask the user which city/area they mean before searching."
+        )
+        candidates.append({**z, "hint": hint})
+
+    return {
+        "status": "ambiguous",
+        "query": raw,
+        "best": None,
+        "candidates": candidates,
+        "hint": "Ask the user to pick one zone (by name) or refine the destination, then call search_hotels.",
+    }
+
+
+async def expand_zone_jpdcodes(db: AsyncSession, root_jpdcodes: list[str]) -> list[str]:
+    """All zone `jpdcode` values that are roots or descendants (children) of roots.
+
+    Uses PostgreSQL `WITH RECURSIVE`. Empty / duplicate roots are ignored.
+    """
+    roots = list(dict.fromkeys(r.strip() for r in root_jpdcodes if r and str(r).strip()))
+    if not roots:
+        return []
+
+    stmt = (
+        text(
+            """
+            WITH RECURSIVE subzones AS (
+                SELECT jpdcode FROM zones WHERE jpdcode IN :roots
+                UNION ALL
+                SELECT z.jpdcode FROM zones z
+                INNER JOIN subzones s ON z.parent_jpdcode = s.jpdcode
+                  AND COALESCE(NULLIF(TRIM(z.parent_jpdcode), ''), '') <> ''
+            )
+            SELECT DISTINCT jpdcode FROM subzones
+            """
+        ).bindparams(bindparam("roots", expanding=True))
+    )
+    result = await db.execute(stmt, {"roots": tuple(roots)})
+    return [row[0] for row in result.fetchall()]
+
+
+async def list_hotels_in_zone_jpdcodes(
+    db: AsyncSession,
+    jpdcode_list: list[str],
+    *,
+    limit: int = 30,
+    offset: int = 0,
+    expand_descendants: bool = True,
+) -> dict:
+    """List hotels from `hotel_cache` whose `zone_jpdcode` falls under given zone jpdcode(s).
+
+    When ``expand_descendants`` is True, includes hotels in child zones (PostgreSQL recursive CTE).
+    """
+    lim = max(1, min(limit, 200))
+    off = max(0, offset)
+
+    if expand_descendants:
+        zone_keys = await expand_zone_jpdcodes(db, jpdcode_list)
+    else:
+        zone_keys = list(dict.fromkeys(j.strip() for j in jpdcode_list if j and j.strip()))
+
+    if not zone_keys:
+        return {
+            "hotels": [],
+            "total_returned": 0,
+            "has_more": False,
+            "zone_jpdcodes_resolved": [],
+            "offset": off,
+            "limit": lim,
+        }
+
+    q = (
+        select(HotelCache)
+        .where(HotelCache.zone_jpdcode.in_(zone_keys))
+        .order_by(HotelCache.jp_code)
+        .offset(off)
+        .limit(lim + 1)
+    )
+    result = await db.execute(q)
+    rows = list(result.scalars().all())
+    has_more = len(rows) > lim
+    rows = rows[:lim]
+
+    hotels = [
+        {
+            "jp_code": h.jp_code,
+            "name": h.name,
+            "zone_jpdcode": h.zone_jpdcode or "",
+            "category_type": h.category_type or "",
+            "city_name": h.city_name or "",
+        }
+        for h in rows
+    ]
+    return {
+        "hotels": hotels,
+        "total_returned": len(hotels),
+        "has_more": has_more,
+        "zone_jpdcodes_resolved": zone_keys,
+        "offset": off,
+        "limit": lim,
+    }
+
+
+async def explain_catalog_lookup(db: AsyncSession, code_type: str, code: str) -> dict | None:
+    """Return display name for a catalogue code (DB only). code_type: board|hotel_category|country|currency"""
+    ct = (code_type or "").lower().strip()
+    c = (code or "").strip()
+    if not c:
+        return None
+
+    if ct in ("board", "board_type", "meal", "meal_plan"):
+        row = await db.get(BoardType, c)
+        if row:
+            return {"code_type": "board", "code": row.code, "name": row.name}
+    elif ct in ("hotel_category", "category", "star", "stars"):
+        row = await db.get(HotelCategory, c)
+        if row:
+            return {"code_type": "hotel_category", "code": row.type, "name": row.name}
+    elif ct in ("country", "country_iso"):
+        row = await db.get(Country, c.upper())
+        if row:
+            return {"code_type": "country", "code": row.code, "name": row.name}
+    elif ct in ("currency", "curr"):
+        row = await db.get(Currency, c.upper())
+        if row:
+            return {"code_type": "currency", "code": row.code, "name": row.name}
+    return None
 
 
 async def get_hotel_by_jpcode(db: AsyncSession, jp_code: str) -> dict | None:

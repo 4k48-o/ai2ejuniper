@@ -3,6 +3,7 @@
 import json
 import re
 import uuid
+from datetime import date, timedelta
 
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -16,6 +17,9 @@ from juniper_ai.app.juniper.exceptions import (
     PriceChangedError,
     BookingPendingError,
 )
+
+_CI = (date.today() + timedelta(days=30)).isoformat()
+_CO = (date.today() + timedelta(days=33)).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +54,8 @@ async def test_search_hotels_happy_path():
 
         result = await search_hotels.ainvoke({
             "destination": "Barcelona",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "Test Hotel" in result
@@ -70,8 +74,8 @@ async def test_search_hotels_soap_timeout():
 
         result = await search_hotels.ainvoke({
             "destination": "Barcelona",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "temporarily unavailable" in result.lower()
@@ -89,8 +93,8 @@ async def test_search_hotels_room_unavailable():
 
         result = await search_hotels.ainvoke({
             "destination": "Barcelona",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "no longer available" in result.lower()
@@ -109,8 +113,8 @@ async def test_search_hotels_unexpected_exception_reraises():
         with pytest.raises(RuntimeError, match="unexpected"):
             await search_hotels.ainvoke({
                 "destination": "Barcelona",
-                "check_in": "2026-04-15",
-                "check_out": "2026-04-18",
+                "check_in": _CI,
+                "check_out": _CO,
             })
 
 
@@ -126,8 +130,8 @@ async def test_search_hotels_no_results():
 
         result = await search_hotels.ainvoke({
             "destination": "NowhereVille",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "no hotels found" in result.lower()
@@ -237,8 +241,8 @@ async def test_book_hotel_happy_path():
     mock_client.hotel_booking.return_value = {
         "booking_id": "BK-12345",
         "hotel_name": "Test Hotel",
-        "check_in": "2026-04-15",
-        "check_out": "2026-04-18",
+        "check_in": _CI,
+        "check_out": _CO,
         "total_price": "540.00",
         "currency": "EUR",
         "status": "confirmed",
@@ -252,8 +256,8 @@ async def test_book_hotel_happy_path():
             "rate_plan_code": "RPC_001",
             "guest_name": "John Doe",
             "guest_email": "john@example.com",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "BK-12345" in result
@@ -311,8 +315,8 @@ async def test_book_hotel_soap_timeout():
             "rate_plan_code": "RPC_001",
             "guest_name": "John Doe",
             "guest_email": "john@example.com",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "temporarily unavailable" in result.lower()
@@ -331,8 +335,8 @@ async def test_book_hotel_room_unavailable():
             "rate_plan_code": "RPC_INVALID",
             "guest_name": "John Doe",
             "guest_email": "john@example.com",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "no longer available" in result.lower()
@@ -352,8 +356,8 @@ async def test_book_hotel_unexpected_exception_reraises():
                 "rate_plan_code": "RPC_001",
                 "guest_name": "John Doe",
                 "guest_email": "john@example.com",
-                "check_in": "2026-04-15",
-                "check_out": "2026-04-18",
+                "check_in": _CI,
+                "check_out": _CO,
             })
 
 
@@ -370,8 +374,8 @@ async def test_book_hotel_price_changed():
             "rate_plan_code": "RPC_001",
             "guest_name": "John Doe",
             "guest_email": "john@example.com",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "price has changed" in result.lower()
@@ -393,8 +397,8 @@ async def test_book_hotel_booking_pending():
             "rate_plan_code": "RPC_001",
             "guest_name": "John Doe",
             "guest_email": "john@example.com",
-            "check_in": "2026-04-15",
-            "check_out": "2026-04-18",
+            "check_in": _CI,
+            "check_out": _CO,
         })
 
     assert "being processed" in result.lower()
@@ -661,14 +665,17 @@ async def test_cancel_booking_soap_timeout():
 
 
 @pytest.mark.asyncio
-async def test_modify_booking_embeds_booking_event():
+async def test_modify_booking_returns_preview():
     mock_client = AsyncMock()
-    mock_client.modify_booking.return_value = {
-        "booking_id": "JNP-XYZ98765",
-        "status": "modified",
-        "check_in": "2026-05-01",
-        "check_out": "2026-05-03",
-    }
+    mock_client.hotel_modify = AsyncMock(
+        return_value={
+            "booking_id": "JNP-XYZ98765",
+            "status": "modification_pending",
+            "check_in": "2026-05-01",
+            "check_out": "2026-05-03",
+            "modify_code": "MC-TEST1234",
+        },
+    )
 
     with patch("juniper_ai.app.agent.tools.modify_booking.get_juniper_client", return_value=mock_client), \
          patch("juniper_ai.app.agent.tools.modify_booking.get_current_user_id", return_value="user-1"):
@@ -678,9 +685,9 @@ async def test_modify_booking_embeds_booking_event():
             {"booking_id": "JNP-XYZ98765", "new_check_in": "2026-05-01", "new_check_out": "2026-05-03"}
         )
 
-    assert "__BOOKING_EVENT__" in result
-    assert "__END_BOOKING_EVENT__" in result
-    assert "booking.modified" in result
+    assert "Modification Preview" in result
+    assert "MC-TEST1234" in result
+    mock_client.hotel_modify.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -700,12 +707,7 @@ async def test_modify_booking_unknown_id_returns_not_found():
         )
 
     assert "not_found" in result.lower()
-    m = re.search(r"__BOOKING_EVENT__(.+?)__END_BOOKING_EVENT__", result, re.DOTALL)
-    assert m
-    payload = json.loads(m.group(1))
-    assert payload["status"] == "not_found"
-    assert payload["booking_id"] == booking_id
-    assert payload["event_type"] == "booking.modified"
+    assert booking_id in result
 
 
 @pytest.mark.asyncio
@@ -732,18 +734,15 @@ async def test_modify_booking_check_in_only_preserves_check_out():
 
     assert "2026-12-01" in result
     assert orig_out in result
-    assert "__BOOKING_EVENT__" in result
-    m = re.search(r"__BOOKING_EVENT__(.+?)__END_BOOKING_EVENT__", result, re.DOTALL)
-    payload = json.loads(m.group(1))
-    assert payload["check_in"] == "2026-12-01"
-    assert payload["check_out"] == orig_out
+    assert "Modification Preview" in result
+    assert "ModifyCode" in result
 
 
 @pytest.mark.asyncio
 async def test_modify_booking_soap_timeout():
     """TOOL-32: SOAPTimeoutError → temporarily unavailable message."""
     mock_client = AsyncMock()
-    mock_client.modify_booking.side_effect = SOAPTimeoutError()
+    mock_client.hotel_modify = AsyncMock(side_effect=SOAPTimeoutError())
 
     with patch("juniper_ai.app.agent.tools.modify_booking.get_juniper_client", return_value=mock_client), \
          patch("juniper_ai.app.agent.tools.modify_booking.get_current_user_id", return_value="user-1"):
