@@ -1,27 +1,40 @@
 """Hotel search tool for LangGraph agent.
 
-Static/SOAP cut-over:
-- **PostgreSQL (L1)**: destination → zone `code` via ``get_zone_code`` / ``get_zone_candidates``
-  (no SOAP).
-- **Juniper SOAP**: availability and prices via ``hotel_avail`` only.
+Static/SOAP cut-over (post Juniper ticket 1096690 ``REQ_PRACTICE`` fix):
+
+- **PostgreSQL (L1)**:
+    - Destination text → zone (``jpdcode`` + ``code`` + ``area_type``) via
+      :func:`get_zone_code` / :func:`get_zone_candidates`.
+    - Zone ``jpdcode`` (+ descendants) → JPCode list via
+      :func:`list_hotels_in_zone_jpdcodes` (PostgreSQL recursive CTE).
+- **Juniper SOAP**: availability and prices via
+  ``hotel_avail(hotel_codes=...)`` only. ``DestinationZone`` is rejected by
+  Juniper with ``REQ_PRACTICE`` for the ``TestXMLFlicknmix`` account and is
+  no longer used by this tool.
 """
 
 import logging
+import time
 
 from langchain_core.tools import tool
 
-from juniper_ai.app.juniper.exceptions import (
-    SOAPTimeoutError,
-    JuniperFaultError,
-    RoomUnavailableError,
-    PriceChangedError,
-    BookingPendingError,
-    NoResultsError,
-)
 from juniper_ai.app.agent.tools._date_utils import validate_dates
+from juniper_ai.app.config import settings
 from juniper_ai.app.db.session import async_session
+from juniper_ai.app.juniper.exceptions import (
+    BookingPendingError,
+    JuniperFaultError,
+    NoResultsError,
+    PriceChangedError,
+    RoomUnavailableError,
+    SOAPTimeoutError,
+)
 from juniper_ai.app.juniper.mock_client import get_juniper_client
-from juniper_ai.app.juniper.static_data import get_zone_code, get_zone_candidates
+from juniper_ai.app.juniper.static_data import (
+    get_zone_candidates,
+    get_zone_code,
+    list_hotels_in_zone_jpdcodes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,37 +68,72 @@ async def search_hotels(
         A formatted list of available hotels with prices and details.
     """
     logger.info(
-        "Tool search_hotels called with args: destination=%s, check_in=%s, check_out=%s, adults=%s, children=%s, star=%s, max_price=%s, board=%s",
+        "Tool search_hotels called with args: destination=%s, check_in=%s, check_out=%s, "
+        "adults=%s, children=%s, star=%s, max_price=%s, board=%s",
         destination, check_in, check_out, adults, children, star_rating, max_price, board_type,
     )
+    t_start = time.monotonic()
     date_error = validate_dates(check_in, check_out)
     if date_error:
         return date_error
 
-    # Resolve destination text → zone code via local cache
+    # Step 1: destination text → zone (jpdcode + code + area_type) via local cache.
     async with async_session() as db:
         zone = await get_zone_code(db, destination)
 
     if not zone:
-        # Try to find candidates for disambiguation
         async with async_session() as db:
             candidates = await get_zone_candidates(db, destination, limit=5)
         if candidates:
-            lines = [f"Could not find exact match for '{destination}'. Did you mean:"]
+            lines = [f"Could not find an exact match for '{destination}'. Did you mean:"]
             for c in candidates:
                 lines.append(f"  - {c['name']} ({c['area_type']})")
+            lines.append("Please reply with one of the names above so I can search.")
             return "\n".join(lines)
-        # No candidates at all — fall back to passing destination as-is (for mock mode compatibility)
-        zone_code = destination
-        logger.warning("No zone found for '%s', using as-is", destination)
-    else:
-        zone_code = zone["code"]
-        logger.info("Resolved '%s' → zone code %s (%s)", destination, zone_code, zone["name"])
+        return (
+            f"Could not find any zone matching '{destination}'. "
+            "Please check the destination name, or run static data sync "
+            "(`python scripts/run_static_data_sync.py`) if the local catalogue is empty."
+        )
 
+    logger.info(
+        "Resolved '%s' → jpdcode=%s code=%s (%s, %s)",
+        destination, zone["jpdcode"], zone["code"], zone["name"], zone["area_type"],
+    )
+
+    # Step 2: zone.jpdcode (+ descendants) → JPCode list from local hotel_cache.
+    # Juniper UAT requires HotelCodes for availability search; DestinationZone
+    # is rejected with REQ_PRACTICE.
+    max_candidates = settings.hotel_avail_max_candidates
+    async with async_session() as db:
+        jp_codes = await list_hotels_in_zone_jpdcodes(
+            db,
+            [zone["jpdcode"]],
+            limit=max_candidates,
+            expand_descendants=True,
+            only_jpcodes=True,
+        )
+
+    if not jp_codes:
+        return (
+            f"No hotels are cached locally for {zone['name']} "
+            f"({zone['area_type']}, jpdcode={zone['jpdcode']}). "
+            "The static catalogue may need to be refreshed — please run "
+            "`python scripts/run_static_data_sync.py` and retry."
+        )
+
+    if len(jp_codes) >= max_candidates:
+        logger.info(
+            "search_hotels: candidates capped at max_candidates=%d for zone %s "
+            "(more hotels may exist in cache)",
+            max_candidates, zone["jpdcode"],
+        )
+
+    # Step 3: Juniper SOAP HotelAvail with HotelCodes (client batches internally).
     client = get_juniper_client()
     try:
         hotels = await client.hotel_avail(
-            zone_code=zone_code,
+            hotel_codes=jp_codes,
             check_in=check_in,
             check_out=check_out,
             adults=adults,
@@ -96,16 +144,51 @@ async def search_hotels(
             country_of_residence=country_of_residence,
         )
         from juniper_ai.app.juniper.serializers import hotels_to_llm_summary
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "search_hotels OK: destination=%r zone.jpdcode=%s jpcodes=%d "
+            "dates=%s..%s results=%d elapsed=%dms",
+            destination, zone["jpdcode"], len(jp_codes),
+            check_in, check_out, len(hotels), elapsed_ms,
+        )
         return hotels_to_llm_summary(hotels)
     except SOAPTimeoutError:
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        logger.warning(
+            "search_hotels TIMEOUT: destination=%r zone.jpdcode=%s "
+            "jpcodes=%d elapsed=%dms",
+            destination, zone["jpdcode"], len(jp_codes), elapsed_ms,
+        )
         return "Hotel booking service is temporarily unavailable. Please try again in a moment."
     except RoomUnavailableError:
         return "This room is no longer available. Let me search for alternatives."
     except PriceChangedError as e:
-        return f"The price has changed from {e.old_price} to {e.new_price}. Would you like to proceed with the new price?"
+        return (
+            f"The price has changed from {e.old_price} to {e.new_price}. "
+            "Would you like to proceed with the new price?"
+        )
     except NoResultsError:
-        return "No hotels found for your search criteria. Try different dates or destination."
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "search_hotels EMPTY: destination=%r zone.jpdcode=%s "
+            "jpcodes=%d dates=%s..%s elapsed=%dms",
+            destination, zone["jpdcode"], len(jp_codes),
+            check_in, check_out, elapsed_ms,
+        )
+        return (
+            f"No hotels found in {zone['name']} for {check_in} to {check_out}. "
+            "Try different dates or a nearby area."
+        )
     except JuniperFaultError as e:
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        # Client already emitted one aggregated fault log with fault_code +
+        # batch index; re-log here with search context so operators can
+        # correlate the user-facing failure with the SOAP trace.
+        logger.error(
+            "search_hotels FAULT: destination=%r zone.jpdcode=%s "
+            "jpcodes=%d fault_code=%s elapsed=%dms",
+            destination, zone["jpdcode"], len(jp_codes), e.fault_code, elapsed_ms,
+        )
         return f"The booking system returned an error: {e}"
     except BookingPendingError:
         return "Your booking is being processed. Please wait a moment."

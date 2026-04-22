@@ -125,6 +125,22 @@ ACTIVE_CONVERSATIONS = Gauge(
     "Number of currently active conversations",
 )
 
+# HotelAvail batch-level telemetry (ticket 1096690 HotelCodes path).
+# One tick per batch; ``status`` captures the Juniper outcome so we can
+# spot REQ_PRACTICE regressions, timeout spikes, and empty-result drift.
+HOTEL_AVAIL_BATCHES = Counter(
+    "juniper_hotel_avail_batches_total",
+    "HotelAvail batch call outcomes (status = ok | empty | fault | timeout)",
+    labels=("status",),
+)
+
+# JPCode candidate count per search — high values mean the local cache
+# fan-out for a zone is large (and HotelAvail batching is doing real work).
+HOTEL_AVAIL_CANDIDATES = Histogram(
+    "juniper_hotel_avail_candidates",
+    "JPCode candidate count per HotelAvail search (post-truncation)",
+)
+
 
 # ---------------------------------------------------------------------------
 # Convenience recording functions
@@ -147,6 +163,18 @@ def record_juniper_error(error_type: str) -> None:
     JUNIPER_API_ERRORS.inc((error_type,))
 
 
+def record_hotel_avail_batch(status: str) -> None:
+    """Record a HotelAvail batch outcome.
+
+    ``status`` SHOULD be one of: ``ok``, ``empty``, ``fault``, ``timeout``.
+    """
+    HOTEL_AVAIL_BATCHES.inc((status,))
+
+
+def record_hotel_avail_candidates(count: int) -> None:
+    HOTEL_AVAIL_CANDIDATES.observe(float(count))
+
+
 # ---------------------------------------------------------------------------
 # Render all metrics
 # ---------------------------------------------------------------------------
@@ -157,6 +185,8 @@ ALL_METRICS = [
     JUNIPER_API_LATENCY,
     JUNIPER_API_ERRORS,
     ACTIVE_CONVERSATIONS,
+    HOTEL_AVAIL_BATCHES,
+    HOTEL_AVAIL_CANDIDATES,
 ]
 
 

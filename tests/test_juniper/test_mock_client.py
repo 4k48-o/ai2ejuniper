@@ -30,6 +30,38 @@ async def test_hotel_avail_returns_all_for_any_zone(client):
 
 
 @pytest.mark.asyncio
+async def test_hotel_avail_filters_by_hotel_codes(client):
+    """Primary path — hotel_codes filters MOCK_HOTELS by hotel_code (case-insensitive)."""
+    hotels = await client.hotel_avail(
+        hotel_codes=["hot001", "HOT003", "UNKNOWN_CODE"],
+        check_in="2026-04-15",
+        check_out="2026-04-18",
+    )
+    codes = {h["hotel_code"] for h in hotels}
+    assert codes == {"HOT001", "HOT003"}
+
+
+@pytest.mark.asyncio
+async def test_hotel_avail_without_any_input_raises(client):
+    """At least one of hotel_codes or zone_code is required (matches abstract contract)."""
+    with pytest.raises(ValueError, match="hotel_codes"):
+        await client.hotel_avail(check_in="2026-04-15", check_out="2026-04-18")
+
+
+@pytest.mark.asyncio
+async def test_hotel_avail_hotel_codes_with_filters(client):
+    """hotel_codes + star_rating combine (JPCode filter first, then post-filters)."""
+    hotels = await client.hotel_avail(
+        hotel_codes=["HOT001", "HOT002", "HOT003", "HOT004", "HOT005"],
+        check_in="2026-04-15",
+        check_out="2026-04-18",
+        star_rating=5,
+    )
+    assert len(hotels) >= 1
+    assert all("5" in h["category"] for h in hotels)
+
+
+@pytest.mark.asyncio
 async def test_hotel_check_avail_valid_code(client):
     result = await client.hotel_check_avail("RPC_001_DBL_BB")
     assert result["available"] is True
@@ -91,7 +123,7 @@ async def test_modify_booking(client):
     booking_id = booking["booking_id"]
 
     # Modify
-    result = await client.modify_booking(booking_id, check_in="2026-04-20", check_out="2026-04-23")
+    result = await client.hotel_modify(booking_id, check_in="2026-04-20", check_out="2026-04-23")
     assert result.get("check_in") == "2026-04-20"
 
 
@@ -141,13 +173,13 @@ async def test_cancel_booking_same_user_succeeds(client, bob_booking):
 async def test_modify_booking_cross_user_raises_ownership_error(client, bob_booking):
     """Alice cannot modify Bob's booking."""
     with pytest.raises(BookingOwnershipError):
-        await client.modify_booking(bob_booking, user_id="user-alice", check_in="2026-05-01")
+        await client.hotel_modify(bob_booking, user_id="user-alice", check_in="2026-05-01")
 
 
 @pytest.mark.asyncio
 async def test_modify_booking_same_user_succeeds(client, bob_booking):
     """Bob can modify his own booking."""
-    result = await client.modify_booking(bob_booking, user_id="user-bob", check_in="2026-05-01")
+    result = await client.hotel_modify(bob_booking, user_id="user-bob", check_in="2026-05-01")
     assert result["check_in"] == "2026-05-01"
 
 

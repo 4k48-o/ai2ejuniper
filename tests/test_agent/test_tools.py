@@ -27,6 +27,12 @@ _CO = (date.today() + timedelta(days=33)).isoformat()
 # ---------------------------------------------------------------------------
 
 
+_MOCK_ZONE = {"jpdcode": "JPD086855", "code": "49435", "name": "Barcelona", "area_type": "CTY"}
+# search_hotels calls list_hotels_in_zone_jpdcodes(only_jpcodes=True), which
+# returns list[str]. Patches below should match that shape.
+_MOCK_CACHE = ["JP046300", "JP046301"]
+
+
 @pytest.mark.asyncio
 async def test_search_hotels_happy_path():
     mock_client = AsyncMock()
@@ -46,10 +52,9 @@ async def test_search_hotels_happy_path():
         }
     ]
 
-    _mock_zone = {"jpdcode": "JPD086855", "code": "49435", "name": "Barcelona", "area_type": "CTY"}
-
     with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
-         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_mock_zone):
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=_MOCK_CACHE):
         from juniper_ai.app.agent.tools.search_hotels import search_hotels
 
         result = await search_hotels.ainvoke({
@@ -60,16 +65,93 @@ async def test_search_hotels_happy_path():
 
     assert "Test Hotel" in result
     assert "150.00" in result
+    # Must use HotelCodes (JPCodes from local cache), not DestinationZone.
+    kw = mock_client.hotel_avail.await_args.kwargs
+    assert kw["hotel_codes"] == ["JP046300", "JP046301"]
+    assert "zone_code" not in kw
+
+
+# §8: 3-city parametric coverage (happy-path + empty-inventory per city).
+_CITY_CASES = [
+    pytest.param(
+        {"jpdcode": "JPD054557", "code": "15011", "name": "Palma de Mallorca", "area_type": "CTY"},
+        ["JP046300"],
+        id="palma-available",
+    ),
+    pytest.param(
+        {"jpdcode": "JPD013826", "code": "13826", "name": "Dubai City", "area_type": "CTY"},
+        ["JP099001", "JP099002"],
+        id="dubai-available",
+    ),
+    pytest.param(
+        {"jpdcode": "JPD086855", "code": "49435", "name": "Barcelona", "area_type": "CTY"},
+        ["JP046400", "JP046401", "JP046402"],
+        id="barcelona-available",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zone,jpcodes", _CITY_CASES)
+async def test_search_hotels_multi_city_happy(zone, jpcodes):
+    """Happy path across 3 supplier-documented cities, asserting HotelCodes plumbing."""
+    mock_client = AsyncMock()
+    mock_client.hotel_avail.return_value = [
+        {"name": f"Hotel-{c}", "total_price": "100.00", "currency": "EUR",
+         "rate_plan_code": f"RPC_{c}", "category": "4 stars", "address": "",
+         "city": zone["name"], "board_type": "Bed & Breakfast",
+         "room_type": "Double", "cancellation_policy": ""}
+        for c in jpcodes
+    ]
+
+    with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=zone), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=jpcodes):
+        from juniper_ai.app.agent.tools.search_hotels import search_hotels
+
+        result = await search_hotels.ainvoke({
+            "destination": zone["name"],
+            "check_in": _CI,
+            "check_out": _CO,
+        })
+
+    # First hotel name should appear in LLM-facing summary.
+    assert f"Hotel-{jpcodes[0]}" in result
+    kw = mock_client.hotel_avail.await_args.kwargs
+    assert kw["hotel_codes"] == jpcodes
+    assert "zone_code" not in kw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zone", [c.values[0] for c in _CITY_CASES])
+async def test_search_hotels_multi_city_no_inventory(zone):
+    """Inventory-empty path: each city surfaces a 'no hotels' message with its name."""
+    mock_client = AsyncMock()
+    mock_client.hotel_avail.side_effect = NoResultsError()
+
+    with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=zone), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=["JP0XXX"]):
+        from juniper_ai.app.agent.tools.search_hotels import search_hotels
+
+        result = await search_hotels.ainvoke({
+            "destination": zone["name"],
+            "check_in": _CI,
+            "check_out": _CO,
+        })
+
+    assert "no hotels found" in result.lower()
+    assert zone["name"] in result
 
 
 @pytest.mark.asyncio
 async def test_search_hotels_soap_timeout():
     mock_client = AsyncMock()
     mock_client.hotel_avail.side_effect = SOAPTimeoutError()
-    _mock_zone = {"jpdcode": "JPD086855", "code": "49435", "name": "Barcelona", "area_type": "CTY"}
 
     with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
-         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_mock_zone):
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=_MOCK_CACHE):
         from juniper_ai.app.agent.tools.search_hotels import search_hotels
 
         result = await search_hotels.ainvoke({
@@ -85,10 +167,10 @@ async def test_search_hotels_soap_timeout():
 async def test_search_hotels_room_unavailable():
     mock_client = AsyncMock()
     mock_client.hotel_avail.side_effect = RoomUnavailableError()
-    _mock_zone = {"jpdcode": "JPD086855", "code": "49435", "name": "Barcelona", "area_type": "CTY"}
 
     with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
-         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_mock_zone):
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=_MOCK_CACHE):
         from juniper_ai.app.agent.tools.search_hotels import search_hotels
 
         result = await search_hotels.ainvoke({
@@ -104,10 +186,10 @@ async def test_search_hotels_room_unavailable():
 async def test_search_hotels_unexpected_exception_reraises():
     mock_client = AsyncMock()
     mock_client.hotel_avail.side_effect = RuntimeError("unexpected")
-    _mock_zone = {"jpdcode": "JPD086855", "code": "49435", "name": "Barcelona", "area_type": "CTY"}
 
     with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
-         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_mock_zone):
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=_MOCK_CACHE):
         from juniper_ai.app.agent.tools.search_hotels import search_hotels
 
         with pytest.raises(RuntimeError, match="unexpected"):
@@ -122,10 +204,10 @@ async def test_search_hotels_unexpected_exception_reraises():
 async def test_search_hotels_no_results():
     mock_client = AsyncMock()
     mock_client.hotel_avail.side_effect = NoResultsError()
-    _mock_zone = {"jpdcode": "JPD086855", "code": "49435", "name": "Barcelona", "area_type": "CTY"}
 
     with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
-         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_mock_zone):
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=_MOCK_CACHE):
         from juniper_ai.app.agent.tools.search_hotels import search_hotels
 
         result = await search_hotels.ainvoke({
@@ -135,6 +217,29 @@ async def test_search_hotels_no_results():
         })
 
     assert "no hotels found" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_search_hotels_empty_local_cache_prompts_sync():
+    """Zone resolved but local hotel_cache has no JPCodes → user gets a sync hint."""
+    empty_cache: list[str] = []
+    mock_client = AsyncMock()
+
+    with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch("juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes", return_value=empty_cache):
+        from juniper_ai.app.agent.tools.search_hotels import search_hotels
+
+        result = await search_hotels.ainvoke({
+            "destination": "Barcelona",
+            "check_in": _CI,
+            "check_out": _CO,
+        })
+
+    assert "cached locally" in result.lower()
+    assert "run_static_data_sync" in result
+    # SOAP must NOT be called when we have no JPCodes.
+    mock_client.hotel_avail.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

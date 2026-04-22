@@ -181,18 +181,62 @@ class MockJuniperClient(HotelSupplier):
     # ---- Booking flow ----
 
     async def hotel_avail(
-        self, zone_code: str, check_in: str, check_out: str,
-        adults: int = 2, children: int = 0,
+        self,
+        zone_code: str | None = None,
+        check_in: str = "",
+        check_out: str = "",
+        adults: int = 2,
+        children: int = 0,
         star_rating: int | None = None,
         max_price: float | None = None,
         board_type: str | None = None,
         country_of_residence: str | None = None,
+        *,
+        hotel_codes: list[str] | None = None,
         **kwargs,
     ) -> list[dict]:
-        logger.info("[MOCK] HotelAvail: zone=%s, %s to %s, star=%s, max_price=%s, board=%s",
-                     zone_code, check_in, check_out, star_rating, max_price, board_type)
-        # In mock mode, return all hotels (zone filtering is simulated)
-        results = list(MOCK_HOTELS)
+        """Mock HotelAvail — honours the §1 abstract contract.
+
+        Primary path (aligned with production): ``hotel_codes`` filters
+        ``MOCK_HOTELS`` by ``hotel_code`` (case-insensitive). Codes that do
+        not match any mock hotel are silently dropped.
+
+        Legacy path (tests & local demo): when ``hotel_codes`` is empty but
+        ``zone_code`` is given, return the full ``MOCK_HOTELS`` list
+        (zone filtering is simulated — mock does not model zone membership).
+
+        Post-filters (``star_rating`` / ``max_price`` / ``board_type``)
+        always apply.
+        """
+        normalized_codes: list[str] = []
+        if hotel_codes:
+            seen: set[str] = set()
+            for c in hotel_codes:
+                cleaned = str(c or "").strip().upper()
+                if cleaned and cleaned not in seen:
+                    seen.add(cleaned)
+                    normalized_codes.append(cleaned)
+
+        logger.info(
+            "[MOCK] HotelAvail: hotel_codes=%s (n=%d), zone=%s, %s to %s, "
+            "star=%s, max_price=%s, board=%s",
+            normalized_codes[:5] + (["..."] if len(normalized_codes) > 5 else []),
+            len(normalized_codes), zone_code, check_in, check_out,
+            star_rating, max_price, board_type,
+        )
+
+        if normalized_codes:
+            codes_set = set(normalized_codes)
+            results = [h for h in MOCK_HOTELS if h["hotel_code"].upper() in codes_set]
+        elif zone_code is not None:
+            # Legacy path — simulate zone search by returning the full catalogue.
+            results = list(MOCK_HOTELS)
+        else:
+            # Match the abstract contract: at least one of the two must be given.
+            raise ValueError(
+                "MockJuniperClient.hotel_avail requires 'hotel_codes' "
+                "(preferred) or 'zone_code' (legacy)."
+            )
 
         if star_rating is not None:
             results = [h for h in results if str(star_rating) in h["category"]]

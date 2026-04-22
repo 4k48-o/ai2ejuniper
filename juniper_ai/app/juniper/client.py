@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -13,6 +14,10 @@ from juniper_ai.app.juniper.exceptions import (
     PriceChangedError,
     RoomUnavailableError,
     SOAPTimeoutError,
+)
+from juniper_ai.app.metrics import (
+    record_hotel_avail_batch,
+    record_hotel_avail_candidates,
 )
 from juniper_ai.app.juniper.serializers import (
     serialize_booking,
@@ -324,10 +329,17 @@ class JuniperClient(HotelSupplier):
                 "city_name": str(getattr(city, "_value_1", getattr(city, "Name", ""))) if city else "",
                 "city_jpdcode": str(getattr(city, "JPDCode", "")) if city else "",
             })
+        # TotalRecords may be present but None on some UAT responses; getattr default only applies if missing.
+        raw_total = getattr(portfolio, "TotalRecords", None)
+        try:
+            total_records = int(raw_total) if raw_total is not None else 0
+        except (TypeError, ValueError):
+            total_records = 0
+
         return {
             "hotels": hotels,
             "next_token": str(getattr(portfolio, "NextToken", "") or ""),
-            "total_records": int(getattr(portfolio, "TotalRecords", 0)),
+            "total_records": total_records,
         }
 
     async def hotel_content(self, hotel_codes: list[str]) -> list[dict]:
@@ -366,14 +378,21 @@ class JuniperClient(HotelSupplier):
             name = ""
             content_list = getattr(item, "ItemContentList", None)
             if content_list:
-                for ic in getattr(content_list, "ItemContent", []):
-                    if getattr(ic, "Language", "").upper() == "EN":
-                        name = str(getattr(ic, "Name", ""))
+                for ic in getattr(content_list, "ItemContent", []) or []:
+                    if ic is None:
+                        continue
+                    # Language may be present on the node but null; getattr default only applies if missing.
+                    lang = (getattr(ic, "Language", None) or "").strip().upper()
+                    if lang == "EN":
+                        name = str(getattr(ic, "Name", "") or "")
                         break
                 if not name:
-                    first = next(iter(getattr(content_list, "ItemContent", [])), None)
+                    first = next(
+                        (x for x in (getattr(content_list, "ItemContent", []) or []) if x is not None),
+                        None,
+                    )
                     if first:
-                        name = str(getattr(first, "Name", ""))
+                        name = str(getattr(first, "Name", "") or "")
             items.append({"code": str(getattr(item, "Code", "")), "name": name})
         return items
 
@@ -401,42 +420,57 @@ class JuniperClient(HotelSupplier):
 
     # ---- Booking flow methods ----
 
-    async def hotel_avail(
-        self, zone_code: str, check_in: str, check_out: str,
-        adults: int = 2, children: int = 0,
-        star_rating: int | None = None,
-        max_price: float | None = None,
-        board_type: str | None = None,
-        country_of_residence: str | None = None,
-        **kwargs,
+    @staticmethod
+    def _normalize_hotel_codes(raw: list[str] | None) -> list[str]:
+        """Upper-case, strip, dedupe JPCodes; preserve original order."""
+        if not raw:
+            return []
+        seen: set[str] = set()
+        out: list[str] = []
+        for code in raw:
+            if not code:
+                continue
+            cleaned = str(code).strip().upper()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            out.append(cleaned)
+        return out
+
+    async def _hotel_avail_batch(
+        self,
+        *,
+        hotel_codes: list[str],
+        start_date: date,
+        end_date: date,
+        paxes: list[dict],
+        country_of_residence: str | None,
+        batch_index: int,
+        total_batches: int,
     ) -> list[dict]:
-        """Search for available hotels by zone code."""
-        logger.info("HotelAvail: zone=%s, %s to %s, %d adults", zone_code, check_in, check_out, adults)
+        """Call HotelAvail for a single batch of JPCodes.
 
-        paxes = []
-        for i in range(adults):
-            paxes.append({"IdPax": i + 1, "Age": 30})
-        for i in range(children):
-            paxes.append({"IdPax": adults + i + 1, "Age": 8})
-
-        search_segment_base: dict[str, Any] = {
-            "Start": self._parse_iso_date(check_in),
-            "End": self._parse_iso_date(check_out),
-        }
-        if str(zone_code).upper().startswith("JPD"):
-            search_segment_base["JPDCode"] = str(zone_code).upper()
-        else:
-            search_segment_base["DestinationZone"] = int(zone_code)
-        # JP_SearchSegmentHotels inherits JP_SearchSegmentBase; zeep needs both
-        # explicit attrs and the base payload to serialize reliably.
-        search_segment = {
+        ``NoResultsError`` is swallowed at the caller level (an empty batch
+        is not fatal when other batches may still have inventory).
+        """
+        # JP_SearchSegmentHotels inherits JP_SearchSegmentBase; zeep needs
+        # both the base payload (_value_1) and duplicated attributes to
+        # serialize dates reliably.
+        search_segment_base: dict[str, Any] = {"Start": start_date, "End": end_date}
+        search_segment: dict[str, Any] = {
             "_value_1": search_segment_base,
             **search_segment_base,
+            "HotelCodes": {"HotelCode": list(hotel_codes)},
         }
 
         search_segments_hotels: dict[str, Any] = {"SearchSegmentHotels": search_segment}
         if country_of_residence:
             search_segments_hotels["CountryOfResidence"] = country_of_residence
+
+        logger.info(
+            "HotelAvail batch %d/%d: %d hotel_codes (first=%s)",
+            batch_index, total_batches, len(hotel_codes), hotel_codes[0],
+        )
 
         response = await self._call_with_retry(
             "HotelAvail",
@@ -451,9 +485,184 @@ class JuniperClient(HotelSupplier):
             },
             AdvancedOptions={"TimeOut": 15000},
         )
-        hotels = serialize_hotel_avail(response)
+        return serialize_hotel_avail(response)
+
+    async def hotel_avail(
+        self,
+        zone_code: str | None = None,
+        check_in: str = "",
+        check_out: str = "",
+        adults: int = 2,
+        children: int = 0,
+        star_rating: int | None = None,
+        max_price: float | None = None,
+        board_type: str | None = None,
+        country_of_residence: str | None = None,
+        *,
+        hotel_codes: list[str] | None = None,
+        **kwargs,
+    ) -> list[dict]:
+        """Search for available hotels by explicit JPCode list.
+
+        Juniper UAT (account TestXMLFlicknmix) rejects ``DestinationZone``
+        with ``REQ_PRACTICE`` (ticket 1096690). Callers MUST resolve the
+        destination to a JPCode list via the local ``hotel_cache`` and pass
+        it via ``hotel_codes``. ``zone_code`` is preserved in the signature
+        only to satisfy the abstract ``HotelSupplier`` contract and is
+        ignored here — a non-None value is logged as a warning.
+
+        Behaviour:
+        - Normalizes + dedupes ``hotel_codes``.
+        - Splits them into batches of ``settings.hotel_avail_batch_size``.
+        - Executes batches concurrently, bounded by
+          ``settings.hotel_avail_batch_concurrency``.
+        - Aggregates and de-duplicates results by ``rate_plan_code``.
+        - Per-batch ``NoResultsError`` is tolerated; only raises
+          ``NoResultsError`` when every batch is empty.
+
+        Raises:
+            ValueError: if ``hotel_codes`` is empty or missing.
+            NoResultsError: if no batch returned any rate plan.
+            JuniperFaultError / SOAPTimeoutError: propagated from the first
+                failing batch (other in-flight batches are cancelled).
+        """
+        if zone_code is not None:
+            logger.warning(
+                "HotelAvail called with zone_code=%r; ignored — Juniper requires HotelCodes.",
+                zone_code,
+            )
+
+        codes = self._normalize_hotel_codes(hotel_codes)
+        if not codes:
+            raise ValueError(
+                "JuniperClient.hotel_avail requires a non-empty 'hotel_codes' list. "
+                "Resolve the destination to JPCodes via the local hotel_cache "
+                "(see list_hotels_in_zone_jpdcodes) and pass them here. "
+                "DestinationZone search is rejected by Juniper with REQ_PRACTICE."
+            )
+
+        max_candidates = settings.hotel_avail_max_candidates
+        if max_candidates and len(codes) > max_candidates:
+            logger.warning(
+                "HotelAvail: %d candidates exceeds max_candidates=%d; truncating.",
+                len(codes), max_candidates,
+            )
+            codes = codes[:max_candidates]
+
+        record_hotel_avail_candidates(len(codes))
+
+        batch_size = max(1, settings.hotel_avail_batch_size)
+        concurrency = max(1, settings.hotel_avail_batch_concurrency)
+        batches = [codes[i:i + batch_size] for i in range(0, len(codes), batch_size)]
+
+        paxes: list[dict] = []
+        for i in range(adults):
+            paxes.append({"IdPax": i + 1, "Age": 30})
+        for i in range(children):
+            paxes.append({"IdPax": adults + i + 1, "Age": 8})
+
+        start_date = self._parse_iso_date(check_in)
+        end_date = self._parse_iso_date(check_out)
+
+        logger.info(
+            "HotelAvail: %d JPCodes -> %d batches (size=%d, concurrency=%d), "
+            "%s to %s, adults=%d children=%d",
+            len(codes), len(batches), batch_size, concurrency,
+            check_in, check_out, adults, children,
+        )
+
+        semaphore = asyncio.Semaphore(concurrency)
+        # ``ok_batches`` / ``empty_batches`` are counted only in the success
+        # path; on early abort the first failing batch claims the
+        # ``fault`` / ``timeout`` tick via ``fatal_event`` and siblings
+        # short-circuit without re-reporting (§7 "上报一次" guarantee).
+        ok_batches = 0
+        empty_batches = 0
+        fatal_event = asyncio.Event()
+        t_start = time.monotonic()
+
+        async def _run_batch(idx: int, batch: list[str]) -> list[dict]:
+            nonlocal ok_batches, empty_batches
+            async with semaphore:
+                # Another batch already reported a fatal Juniper error —
+                # don't spend a SOAP round-trip we're about to discard.
+                if fatal_event.is_set():
+                    return []
+                try:
+                    result = await self._hotel_avail_batch(
+                        hotel_codes=batch,
+                        start_date=start_date,
+                        end_date=end_date,
+                        paxes=paxes,
+                        country_of_residence=country_of_residence,
+                        batch_index=idx,
+                        total_batches=len(batches),
+                    )
+                except NoResultsError:
+                    logger.info(
+                        "HotelAvail batch %d/%d: no results (tolerated)",
+                        idx, len(batches),
+                    )
+                    record_hotel_avail_batch("empty")
+                    empty_batches += 1
+                    return []
+                except JuniperFaultError as exc:
+                    # Claim the single-shot fault-report token; later
+                    # batches that race past ``fatal_event.is_set()`` but
+                    # also fail won't double-record or double-log.
+                    if not fatal_event.is_set():
+                        fatal_event.set()
+                        record_hotel_avail_batch("fault")
+                        logger.error(
+                            "HotelAvail batch %d/%d: Juniper fault [%s] — "
+                            "aborting search (candidates=%d, batches=%d)",
+                            idx, len(batches), exc.fault_code,
+                            len(codes), len(batches),
+                        )
+                    raise
+                except SOAPTimeoutError:
+                    if not fatal_event.is_set():
+                        fatal_event.set()
+                        record_hotel_avail_batch("timeout")
+                        logger.error(
+                            "HotelAvail batch %d/%d: SOAP timeout — "
+                            "aborting search (candidates=%d, batches=%d)",
+                            idx, len(batches), len(codes), len(batches),
+                        )
+                    raise
+                if result:
+                    record_hotel_avail_batch("ok")
+                    ok_batches += 1
+                else:
+                    record_hotel_avail_batch("empty")
+                    empty_batches += 1
+                return result
+
+        batch_results = await asyncio.gather(
+            *[_run_batch(i + 1, b) for i, b in enumerate(batches)],
+        )
+
+        merged: dict[str, dict] = {}
+        for batch in batch_results:
+            for hotel in batch:
+                key = hotel.get("rate_plan_code") or f"{hotel.get('hotel_code','')}::{hotel.get('room_type','')}"
+                if key not in merged:
+                    merged[key] = hotel
+
+        hotels = list(merged.values())
+        elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        logger.info(
+            "HotelAvail: %d batches complete (ok=%d, empty=%d), "
+            "%d unique rate plans, candidates=%d, elapsed=%dms",
+            len(batches), ok_batches, empty_batches,
+            len(hotels), len(codes), elapsed_ms,
+        )
+
         if not hotels:
-            raise NoResultsError(f"No hotels found in zone {zone_code} for {check_in} to {check_out}")
+            raise NoResultsError(
+                f"No hotels available for {len(codes)} JPCodes "
+                f"between {check_in} and {check_out}"
+            )
         return hotels
 
     async def hotel_check_avail(self, rate_plan_code: str) -> dict:

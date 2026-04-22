@@ -341,6 +341,38 @@ async def test_list_hotels_in_zone_jpdcodes_respects_limit():
 
 
 @pytest.mark.asyncio
+async def test_list_hotels_in_zone_jpdcodes_only_jpcodes_fast_path():
+    """only_jpcodes=True returns list[str] and skips ORM hydration."""
+    with patch("juniper_ai.app.juniper.static_data.expand_zone_jpdcodes", new_callable=AsyncMock) as ex:
+        ex.return_value = ["Z1", "Z2"]
+        mock_db = AsyncMock()
+        result_mock = MagicMock()
+        result_mock.all.return_value = [("JP046300",), ("JP046301",), ("JP046302",)]
+        mock_db.execute = AsyncMock(return_value=result_mock)
+
+        codes = await list_hotels_in_zone_jpdcodes(
+            mock_db, ["ZROOT"], limit=50, expand_descendants=True, only_jpcodes=True,
+        )
+
+    assert isinstance(codes, list)
+    assert codes == ["JP046300", "JP046301", "JP046302"]
+    # scalars() should NOT be called in the fast path.
+    assert not result_mock.scalars.called
+
+
+@pytest.mark.asyncio
+async def test_list_hotels_in_zone_jpdcodes_only_jpcodes_empty_zones():
+    """only_jpcodes=True with no resolved zones returns empty list (not dict)."""
+    with patch("juniper_ai.app.juniper.static_data.expand_zone_jpdcodes", new_callable=AsyncMock) as ex:
+        ex.return_value = []  # no descendants resolved
+        mock_db = AsyncMock()
+        codes = await list_hotels_in_zone_jpdcodes(
+            mock_db, [""], limit=10, expand_descendants=True, only_jpcodes=True,
+        )
+    assert codes == []
+
+
+@pytest.mark.asyncio
 async def test_mock_client_hotel_catalogue_data():
     from juniper_ai.app.juniper.mock_client import MockJuniperClient
 

@@ -32,15 +32,53 @@ class HotelSupplier(ABC):
 
     @abstractmethod
     async def hotel_avail(
-        self, zone_code: str, check_in: str, check_out: str,
-        adults: int = 2, children: int = 0,
+        self,
+        zone_code: str | None = None,
+        check_in: str = "",
+        check_out: str = "",
+        adults: int = 2,
+        children: int = 0,
         star_rating: int | None = None,
         max_price: float | None = None,
         board_type: str | None = None,
         country_of_residence: str | None = None,
+        *,
+        hotel_codes: list[str] | None = None,
         **kwargs,
     ) -> list[dict]:
-        """Search for available hotels by zone code."""
+        """Search for available hotels.
+
+        Caller MUST provide at least one of ``hotel_codes`` (preferred) or
+        ``zone_code`` (legacy / mock-only fallback).
+
+        Preferred path — ``hotel_codes`` (JPCode list, e.g. ``["JP046300", ...]``):
+            This is the only path accepted by Juniper UAT for the
+            ``TestXMLFlicknmix`` account. Searching availability by
+            ``DestinationZone`` returns ``REQ_PRACTICE`` per Juniper support
+            (ticket 1096690). Production SOAP implementations MUST use this
+            path and SHOULD raise ``ValueError`` when ``hotel_codes`` is
+            missing.
+
+        Legacy path — ``zone_code`` (numeric ``DestinationZone`` or
+        ``JPDxxxxxx``):
+            Kept only for the in-memory mock client and local tests. Real
+            SOAP clients should treat this as unsupported.
+
+        Args:
+            zone_code: Destination zone code; mock / legacy only.
+            check_in:  ISO date ``YYYY-MM-DD``.
+            check_out: ISO date ``YYYY-MM-DD``.
+            adults / children: Pax distribution.
+            star_rating / max_price / board_type: Optional post-filters.
+            country_of_residence: ISO-3166-1 alpha-2; must stay consistent
+                across the whole booking flow.
+            hotel_codes: Explicit JPCode list used by the production SOAP
+                path (keyword-only).
+
+        Raises:
+            ValueError: If both ``hotel_codes`` and ``zone_code`` are empty
+                (concrete implementations decide the exact enforcement).
+        """
 
     @abstractmethod
     async def hotel_check_avail(self, rate_plan_code: str) -> dict:

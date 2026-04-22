@@ -298,10 +298,31 @@ async def list_hotels_in_zone_jpdcodes(
     limit: int = 30,
     offset: int = 0,
     expand_descendants: bool = True,
-) -> dict:
-    """List hotels from `hotel_cache` whose `zone_jpdcode` falls under given zone jpdcode(s).
+    only_jpcodes: bool = False,
+) -> dict | list[str]:
+    """List hotels from ``hotel_cache`` whose ``zone_jpdcode`` falls under the given zone(s).
 
-    When ``expand_descendants`` is True, includes hotels in child zones (PostgreSQL recursive CTE).
+    When ``expand_descendants`` is True, includes hotels in child zones
+    (PostgreSQL recursive CTE via :func:`expand_zone_jpdcodes`).
+
+    Two call modes:
+
+    * **Default (``only_jpcodes=False``)** — used by the agent's LLM-facing
+      tool :func:`juniper_ai.app.agent.tools.static_lookup_tools.list_hotels_for_zones`.
+      Returns the full paginated dict with ``hotels`` (each including
+      ``name``, ``city_name``, ``category_type`` …), ``has_more``, etc.
+      Intended for LLM display, so callers see human-readable context.
+
+    * **Fast path (``only_jpcodes=True``)** — used by the internal
+      :func:`juniper_ai.app.agent.tools.search_hotels.search_hotels` flow.
+      SELECTs only the ``jp_code`` column (no ORM hydration) and returns
+      a deduplicated ``list[str]``. Optimized for feeding Juniper
+      ``HotelAvail`` via ``HotelCodes``. ``offset`` is still honoured,
+      but pagination metadata is dropped — search_hotels just wants the
+      code list up to ``limit``.
+
+    Returns:
+        ``dict`` (default) or ``list[str]`` (``only_jpcodes=True``).
     """
     lim = max(1, min(limit, 200))
     off = max(0, offset)
@@ -312,6 +333,8 @@ async def list_hotels_in_zone_jpdcodes(
         zone_keys = list(dict.fromkeys(j.strip() for j in jpdcode_list if j and j.strip()))
 
     if not zone_keys:
+        if only_jpcodes:
+            return []
         return {
             "hotels": [],
             "total_returned": 0,
@@ -320,6 +343,19 @@ async def list_hotels_in_zone_jpdcodes(
             "offset": off,
             "limit": lim,
         }
+
+    if only_jpcodes:
+        # Fast path: select only the code column, no ORM hydration.
+        q = (
+            select(HotelCache.jp_code)
+            .where(HotelCache.zone_jpdcode.in_(zone_keys))
+            .where(HotelCache.jp_code.isnot(None))
+            .order_by(HotelCache.jp_code)
+            .offset(off)
+            .limit(lim)
+        )
+        result = await db.execute(q)
+        return [row[0] for row in result.all() if row[0]]
 
     q = (
         select(HotelCache)

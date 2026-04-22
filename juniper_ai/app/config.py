@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     static_data_sync_interval_days: int = 15
     hotel_portfolio_page_size: int = 500
 
+    # HotelAvail batching — Juniper UAT requires HotelCodes instead of
+    # DestinationZone (REQ_PRACTICE, ticket 1096690). Availability is now
+    # fetched in parallel batches of JPCodes resolved from the local cache.
+    hotel_avail_batch_size: int = 25
+    hotel_avail_batch_concurrency: int = 3
+    hotel_avail_max_candidates: int = 200
+
     # Conversations
     conversation_ttl_hours: int = 24
     max_message_history: int = 20  # DB fetch limit + agent_node tail window (env: MAX_MESSAGE_HISTORY)
