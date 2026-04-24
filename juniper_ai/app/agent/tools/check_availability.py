@@ -45,7 +45,12 @@ async def check_availability(rate_plan_code: str) -> str:
     except RoomUnavailableError:
         return "This room is no longer available. Let me search for alternatives."
     except PriceChangedError as e:
-        return f"The price has changed from {e.old_price} to {e.new_price}. Would you like to proceed with the new price?"
+        msg = f"The price has changed from {e.old_price} to {e.new_price} {e.currency}."
+        if e.new_rate_plan_code:
+            # Juniper docs: callers must continue the booking flow with the
+            # *new* RatePlanCode once warnPriceChanged is raised.
+            msg += f" Updated rate plan: {e.new_rate_plan_code}."
+        return msg + " Would you like to proceed with the new price?"
     except NoResultsError:
         return "No hotels found for your search criteria. Try different dates or destination."
     except JuniperFaultError as e:

@@ -8,6 +8,7 @@ from datetime import date, timedelta
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
+from juniper_ai.app.config import settings
 from juniper_ai.app.db.models import BookingStatus
 from juniper_ai.app.juniper.exceptions import (
     SOAPTimeoutError,
@@ -240,6 +241,57 @@ async def test_search_hotels_empty_local_cache_prompts_sync():
     assert "run_static_data_sync" in result
     # SOAP must NOT be called when we have no JPCodes.
     mock_client.hotel_avail.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_search_hotels_mock_empty_overlap_diagnostic():
+    """Mock mode + non-empty cache but zero HotelAvail rows → actionable [Mock Juniper] text."""
+    mock_client = AsyncMock()
+    mock_client.hotel_avail.return_value = []
+
+    with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch(
+             "juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes",
+             return_value=["JP0UNKNOWN"],
+         ), \
+         patch.object(settings, "juniper_use_mock", True):
+        from juniper_ai.app.agent.tools.search_hotels import search_hotels
+
+        result = await search_hotels.ainvoke({
+            "destination": "Barcelona",
+            "check_in": _CI,
+            "check_out": _CO,
+        })
+
+    assert "[Mock Juniper]" in result
+    assert "JP046300" in result
+    assert "network outage" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_search_hotels_live_empty_supplier_message():
+    """Non-mock + empty HotelAvail list → zone-scoped message (not generic summary-only)."""
+    mock_client = AsyncMock()
+    mock_client.hotel_avail.return_value = []
+
+    with patch("juniper_ai.app.agent.tools.search_hotels.get_juniper_client", return_value=mock_client), \
+         patch("juniper_ai.app.agent.tools.search_hotels.get_zone_code", return_value=_MOCK_ZONE), \
+         patch(
+             "juniper_ai.app.agent.tools.search_hotels.list_hotels_in_zone_jpdcodes",
+             return_value=["JP046300"],
+         ), \
+         patch.object(settings, "juniper_use_mock", False):
+        from juniper_ai.app.agent.tools.search_hotels import search_hotels
+
+        result = await search_hotels.ainvoke({
+            "destination": "Barcelona",
+            "check_in": _CI,
+            "check_out": _CO,
+        })
+
+    assert "No hotels found in" in result
+    assert "Barcelona" in result
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1042,8 @@ async def test_book_hotel_passes_booking_code_to_client():
     assert kw["external_booking_reference"].startswith("JA-")
     assert kw["first_name"] == "Alice"
     assert kw["surname"] == "Wang"
+    assert kw["adults"] == 2
+    assert kw["children"] == 0
 
 
 @pytest.mark.asyncio

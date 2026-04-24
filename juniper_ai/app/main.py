@@ -30,6 +30,13 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting JuniperAI server (env=%s, llm=%s)", settings.app_env, settings.llm_provider)
+    if settings.juniper_use_mock:
+        logger.info("Juniper supplier: MOCK (no outbound SOAP; use for IM/offline dev)")
+    else:
+        logger.info(
+            "Juniper supplier: LIVE SOAP → %s (IM/local dev: set JUNIPER_USE_MOCK=true to skip UAT)",
+            settings.juniper_api_url,
+        )
     yield
     await engine.dispose()
     logger.info("JuniperAI server shutdown")

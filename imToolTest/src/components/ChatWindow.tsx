@@ -10,7 +10,8 @@ const WELCOME_MSG: Message = {
   content:
     '您好！我是 Juniper 酒店预定助手。\n\n' +
     '您可以告诉我想去哪里、什么时候入住，我来帮您找到合适的酒店。\n\n' +
-    '试试说：**"帮我找巴塞罗那的酒店"**',
+    '试试说：**"帮我找巴塞罗那的酒店"**，或 **马略卡 / Palma**（后端 Mock 含 JP046300 烟测数据）。\n\n' +
+    '提示：本地默认走 **Mock Juniper**，无需切换白名单网络；需已启动后端 (端口 8000) 并配置 LLM。',
   contentType: 'text',
   timestamp: new Date(),
 };

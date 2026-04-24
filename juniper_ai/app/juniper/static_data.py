@@ -153,13 +153,35 @@ async def sync_catalogue(client: HotelSupplier, db: AsyncSession) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Short user inputs that collide with multiple supplier ``Zone`` rows (same
+# ``name`` in different countries). Map → canonical searchable name we want
+# for hotel search (see get_zone_code).
+_ZONE_SHORT_NAME_ALIASES: dict[str, str] = {
+    # "Palma" alone matches several CTY; Mallorca is the usual travel intent + JP046300 smoke.
+    "palma": "Palma de Mallorca",
+}
+
+
 async def get_zone_code(db: AsyncSession, destination_text: str) -> dict | None:
     """Fuzzy-match a destination text to a zone code.
 
-    Tries exact match first, then ILIKE. Returns the best searchable match
+    Tries short-name aliases (homonyms), exact match, then contains ILIKE.
+    Returns the best searchable match
     as {"jpdcode": ..., "code": ..., "name": ..., "area_type": ...} or None.
     """
     text = destination_text.strip()
+
+    alias_name = _ZONE_SHORT_NAME_ALIASES.get(text.lower())
+    if alias_name:
+        result = await db.execute(
+            select(Zone).where(
+                Zone.name.ilike(alias_name),
+                Zone.searchable.is_(True),
+            ).limit(1)
+        )
+        zone = result.scalar_one_or_none()
+        if zone:
+            return {"jpdcode": zone.jpdcode, "code": zone.code, "name": zone.name, "area_type": zone.area_type}
 
     # 1. Exact match (case-insensitive)
     result = await db.execute(
@@ -346,10 +368,15 @@ async def list_hotels_in_zone_jpdcodes(
 
     if only_jpcodes:
         # Fast path: select only the code column, no ORM hydration.
+        # The LIKE 'JP%' guard filters out any non-Juniper codes (e.g. mock
+        # fixtures accidentally seeded with JUNIPER_USE_MOCK=true); Juniper's
+        # JPCode is globally prefixed "JP" by definition (see
+        # doc/juniper-hotel-api.md §Hotel Generic Types).
         q = (
             select(HotelCache.jp_code)
             .where(HotelCache.zone_jpdcode.in_(zone_keys))
             .where(HotelCache.jp_code.isnot(None))
+            .where(HotelCache.jp_code.like("JP%"))
             .order_by(HotelCache.jp_code)
             .offset(off)
             .limit(lim)

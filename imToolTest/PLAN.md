@@ -166,7 +166,14 @@ imToolTest/
 
 ## 8. 后续衔接
 
-当 Juniper API 沙箱就绪后：
-1. 将 `mock/chatEngine.ts` 替换为调用后端 `POST /api/v1/conversations/{id}/messages` 接口
-2. 使用 SSE 流式接口 (`/messages/stream`) 实现实时响应
-3. Mock 数据层可保留作为离线开发/测试的 fallback
+**已落地：** 聊天主流程已改为调用后端 `POST /api/v1/conversations` 与 `POST /api/v1/conversations/{id}/messages`（见 `src/api/client.ts`、`ChatWindow.tsx`）。Juniper 侧本地默认 **`MockJuniperClient`**（`juniper_ai/app/juniper/mock_client.py`），与 UAT 白名单解耦。
+
+**仍可选：**
+1. 使用 SSE 流式接口 (`/messages/stream`) 替代整段回复，改善首字延迟
+2. 保留 `mock/chatEngine.ts` 作为纯前端离线 fallback
+
+**当需打真实 UAT SOAP 时：** 将环境变量 `JUNIPER_USE_MOCK=false` 并配置 `JUNIPER_*` 凭证（需网络白名单）。
+
+## 9. Agent + imToolTest 联调（维护）
+
+执行清单与排障：**[IM_DEV_CHECKLIST.md](./IM_DEV_CHECKLIST.md)**（环境、启动顺序、`curl` 冒烟、Mock 场景说明）。

@@ -20,12 +20,26 @@ class RoomUnavailableError(JuniperError):
 
 
 class PriceChangedError(JuniperError):
-    """The price has changed since the last availability check."""
+    """The price has changed since the last availability check.
 
-    def __init__(self, old_price: str, new_price: str, currency: str):
+    When raised by ``HotelCheckAvail`` the new ``RatePlanCode`` (if Juniper
+    supplied one) is attached as :attr:`new_rate_plan_code` — per the
+    official docs, callers should retry the booking flow with the new code
+    rather than the one from the original ``HotelAvail`` response.
+    """
+
+    def __init__(
+        self,
+        old_price: str,
+        new_price: str,
+        currency: str,
+        *,
+        new_rate_plan_code: str = "",
+    ):
         self.old_price = old_price
         self.new_price = new_price
         self.currency = currency
+        self.new_rate_plan_code = new_rate_plan_code
         super().__init__(f"Price changed from {old_price} to {new_price} {currency}")
 
 

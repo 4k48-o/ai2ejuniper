@@ -29,9 +29,14 @@ async def book_hotel(
     guest_email: str,
     check_in: str,
     check_out: str,
+    hotel_code: str = "",
+    total_price: str = "",
+    currency: str = "EUR",
     booking_code: str = "",
     booking_code_expires_at: str = "",
     country_of_residence: str = "ES",
+    adults: int = 2,
+    children: int = 0,
 ) -> str:
     """Book a hotel room. Only call this after the user has confirmed the booking.
 
@@ -41,16 +46,28 @@ async def book_hotel(
         guest_email: Email address for booking confirmation
         check_in: Check-in date in YYYY-MM-DD format
         check_out: Check-out date in YYYY-MM-DD format
-        booking_code: The BookingCode from get_booking_rules (if available)
+        hotel_code: JPCode of the hotel (from search_hotels / get_booking_rules).
+            Juniper requires this on HotelBookingInfo/HotelCode and rejects the
+            request with REQ_PRACTICE when missing.
+        total_price: Total gross amount quoted by get_booking_rules. Used to
+            build the PriceRange tolerance band that guards against silent
+            upward price drift between valuation and booking.
+        currency: ISO-4217 currency of ``total_price`` (EUR by default).
+        booking_code: The BookingCode from get_booking_rules (required for
+            real Juniper — mock flows tolerate absence).
         booking_code_expires_at: Expiration time of BookingCode in ISO format
         country_of_residence: Guest country of residence (ISO-3166-1 alpha-2, default ES)
+        adults: Must match ``search_hotels`` / HotelAvail occupancy (default 2).
+        children: Same — number of child guests (default 0).
 
     Returns:
         Booking confirmation with booking ID and details.
     """
     logger.info(
-        "Tool book_hotel called: rate_plan_code=%s, guest=%s, check_in=%s, check_out=%s, country=%s",
-        rate_plan_code, guest_name, check_in, check_out, country_of_residence,
+        "Tool book_hotel called: rate_plan_code=%s hotel_code=%s total=%s %s "
+        "guest=%s check_in=%s check_out=%s country=%s",
+        rate_plan_code, hotel_code, total_price, currency, guest_name,
+        check_in, check_out, country_of_residence, adults, children,
     )
     date_error = validate_dates(check_in, check_out)
     if date_error:
@@ -86,12 +103,17 @@ async def book_hotel(
             guest_email=guest_email,
             check_in=check_in,
             check_out=check_out,
+            hotel_code=hotel_code,
+            total_price=total_price or None,
+            currency=currency,
             user_id=user_id,
             booking_code=booking_code,
             country_of_residence=country_of_residence,
             external_booking_reference=external_ref,
             first_name=first_name,
             surname=surname,
+            adults=adults,
+            children=children,
         )
 
         booking_data = {

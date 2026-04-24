@@ -79,6 +79,40 @@ MOCK_HOTELS = [
     },
 ]
 
+# IM / offline 联调：与静态库常见 JPCode 对齐（Palma UAT 烟测形态），避免 DB 返回 JP046300
+# 而 mock 只有 HOT00x 导致 hotel_avail 过滤后 0 条。
+MOCK_IM_UAT_FIXTURES: list[dict] = [
+    {
+        "hotel_code": "JP046300",
+        "name": "Allsun Hotel Pil·larí Playa (IM mock — UAT-shaped)",
+        "category": "4 stars",
+        "address": "Playa de Palma (mock)",
+        "city": "Palma de Mallorca",
+        "zone_jpdcode": "JPD054557",
+        "city_jpdcode": "JPD054557",
+        "latitude": "39.5248",
+        "longitude": "2.7311",
+        "rate_plan_code": "MOCK_RPC_IM_JP046300_SA",
+        "total_price": "291.52",
+        "currency": "EUR",
+        "board_type": "Room Only",
+        "room_type": "Double Standard (mock)",
+        "cancellation_policy": "Mock: Room Only — use supplier terms in production.",
+        "status": "OK",
+    },
+]
+
+
+def _all_mock_hotels() -> list[dict]:
+    """Full mock catalogue: UAT-shaped IM fixtures first, then legacy HOT00x rows."""
+    return [*MOCK_IM_UAT_FIXTURES, *MOCK_HOTELS]
+
+
+def mock_catalog_hotel_codes_upper() -> frozenset[str]:
+    """Uppercase hotel/JP codes that :meth:`MockJuniperClient.hotel_avail` can return (for diagnostics)."""
+    return frozenset(h["hotel_code"].upper() for h in _all_mock_hotels())
+
+
 # In-memory fallback for tests that don't have a DB session available.
 # In production mock mode, bookings are persisted to DB by the conversation handler.
 MOCK_BOOKINGS: dict[str, dict] = {}
@@ -130,19 +164,20 @@ class MockJuniperClient(HotelSupplier):
 
     async def hotel_portfolio(self, page_token: str | None = None, page_size: int = 500) -> dict:
         logger.info("[MOCK] HotelPortfolio: token=%s", page_token)
+        catalog = _all_mock_hotels()
         hotels = [
             {
                 "jp_code": h["hotel_code"],
                 "name": h["name"],
-                "zone_jpdcode": "JPD086855",
+                "zone_jpdcode": h.get("zone_jpdcode", "JPD086855"),
                 "category_type": h["category"].replace(" stars", "est"),
                 "address": h["address"],
-                "latitude": "41.3874",
-                "longitude": "2.1686",
+                "latitude": h.get("latitude", "41.3874"),
+                "longitude": h.get("longitude", "2.1686"),
                 "city_name": h["city"],
-                "city_jpdcode": "JPD086855",
+                "city_jpdcode": h.get("city_jpdcode", "JPD086855"),
             }
-            for h in MOCK_HOTELS
+            for h in catalog
         ]
         return {"hotels": hotels, "next_token": "", "total_records": len(hotels)}
 
@@ -150,7 +185,7 @@ class MockJuniperClient(HotelSupplier):
         logger.info("[MOCK] HotelContent: %s", hotel_codes)
         results = []
         for code in hotel_codes[:25]:
-            hotel = next((h for h in MOCK_HOTELS if h["hotel_code"] == code), None)
+            hotel = next((h for h in _all_mock_hotels() if h["hotel_code"] == code), None)
             if hotel:
                 results.append({
                     "jp_code": hotel["hotel_code"],
@@ -197,12 +232,12 @@ class MockJuniperClient(HotelSupplier):
     ) -> list[dict]:
         """Mock HotelAvail — honours the §1 abstract contract.
 
-        Primary path (aligned with production): ``hotel_codes`` filters
-        ``MOCK_HOTELS`` by ``hotel_code`` (case-insensitive). Codes that do
-        not match any mock hotel are silently dropped.
+        Primary path (aligned with production): ``hotel_codes`` filters the
+        combined mock catalogue (``MOCK_IM_UAT_FIXTURES`` + ``MOCK_HOTELS``)
+        by ``hotel_code`` (case-insensitive). Unknown codes are dropped.
 
         Legacy path (tests & local demo): when ``hotel_codes`` is empty but
-        ``zone_code`` is given, return the full ``MOCK_HOTELS`` list
+        ``zone_code`` is given, return the full combined catalogue
         (zone filtering is simulated — mock does not model zone membership).
 
         Post-filters (``star_rating`` / ``max_price`` / ``board_type``)
@@ -227,10 +262,10 @@ class MockJuniperClient(HotelSupplier):
 
         if normalized_codes:
             codes_set = set(normalized_codes)
-            results = [h for h in MOCK_HOTELS if h["hotel_code"].upper() in codes_set]
+            results = [h for h in _all_mock_hotels() if h["hotel_code"].upper() in codes_set]
         elif zone_code is not None:
             # Legacy path — simulate zone search by returning the full catalogue.
-            results = list(MOCK_HOTELS)
+            results = list(_all_mock_hotels())
         else:
             # Match the abstract contract: at least one of the two must be given.
             raise ValueError(
@@ -250,7 +285,7 @@ class MockJuniperClient(HotelSupplier):
 
     async def hotel_check_avail(self, rate_plan_code: str) -> dict:
         logger.info("[MOCK] HotelCheckAvail: %s", rate_plan_code)
-        hotel = next((h for h in MOCK_HOTELS if h["rate_plan_code"] == rate_plan_code), None)
+        hotel = next((h for h in _all_mock_hotels() if h["rate_plan_code"] == rate_plan_code), None)
         if hotel is None:
             raise RoomUnavailableError(f"Rate plan {rate_plan_code} not found")
         return {
@@ -261,9 +296,22 @@ class MockJuniperClient(HotelSupplier):
             "price_changed": False,
         }
 
-    async def hotel_booking_rules(self, rate_plan_code: str) -> dict:
-        logger.info("[MOCK] HotelBookingRules: %s", rate_plan_code)
-        hotel = next((h for h in MOCK_HOTELS if h["rate_plan_code"] == rate_plan_code), None)
+    async def hotel_booking_rules(
+        self,
+        rate_plan_code: str,
+        *,
+        check_in: str | None = None,
+        check_out: str | None = None,
+        hotel_code: str | None = None,
+        expected_price: str | None = None,
+    ) -> dict:
+        # Mock client mirrors the real client signature so the agent tool's
+        # kwargs don't blow up in unit tests / offline demos.
+        logger.info(
+            "[MOCK] HotelBookingRules: %s (check_in=%s, check_out=%s, hotel_code=%s)",
+            rate_plan_code, check_in, check_out, hotel_code,
+        )
+        hotel = next((h for h in _all_mock_hotels() if h["rate_plan_code"] == rate_plan_code), None)
         if hotel is None:
             raise RoomUnavailableError(f"Rate plan {rate_plan_code} not found")
         from datetime import datetime, timedelta, timezone
@@ -283,7 +331,7 @@ class MockJuniperClient(HotelSupplier):
         self, rate_plan_code: str, guest_name: str, guest_email: str, **kwargs,
     ) -> dict:
         logger.info("[MOCK] HotelBooking: %s for %s", rate_plan_code, guest_name)
-        hotel = next((h for h in MOCK_HOTELS if h["rate_plan_code"] == rate_plan_code), None)
+        hotel = next((h for h in _all_mock_hotels() if h["rate_plan_code"] == rate_plan_code), None)
         if hotel is None:
             raise RoomUnavailableError(f"Rate plan {rate_plan_code} not found")
         booking_id = f"JNP-{uuid.uuid4().hex[:8].upper()}"
@@ -372,7 +420,16 @@ class MockJuniperClient(HotelSupplier):
         return {"status": "modified", "modify_code": modify_code}
 
 
-_client_instance = None
+_client_instance: HotelSupplier | None = None
+# Last ``settings.juniper_use_mock`` used to build ``_client_instance`` (None = not yet built).
+_client_want_mock: bool | None = None
+
+
+def reset_juniper_client_singleton() -> None:
+    """Drop the cached supplier client (tests, or after changing ``JUNIPER_USE_MOCK`` in .env)."""
+    global _client_instance, _client_want_mock
+    _client_instance = None
+    _client_want_mock = None
 
 
 def get_juniper_client() -> HotelSupplier:
@@ -380,16 +437,22 @@ def get_juniper_client() -> HotelSupplier:
 
     Returns a singleton instance to avoid re-initializing on every call.
     For the real client, this prevents re-downloading the WSDL on each request.
+
+    If ``settings.juniper_use_mock`` changes after the first call (e.g. editing
+    ``.env`` + reload), the client is **rebuilt** to match the new flag.
     """
-    global _client_instance
-    if _client_instance is not None:
-        return _client_instance
+    global _client_instance, _client_want_mock
 
     from juniper_ai.app.config import settings
+
+    want_mock = bool(settings.juniper_use_mock)
+    if _client_instance is not None and _client_want_mock == want_mock:
+        return _client_instance
 
     if settings.juniper_use_mock:
         _client_instance = MockJuniperClient()
     else:
         from juniper_ai.app.juniper.client import JuniperClient
         _client_instance = JuniperClient()
+    _client_want_mock = want_mock
     return _client_instance

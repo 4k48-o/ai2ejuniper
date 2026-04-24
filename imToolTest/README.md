@@ -1,73 +1,25 @@
-# React + TypeScript + Vite
+# imToolTest
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+酒店预订 **IM 风格聊天前端**，用于与 **JuniperAI 后端 Agent** 联调。请求经 Vite 代理到本机 `8000` 端口的 FastAPI；Juniper SOAP 由 `JUNIPER_USE_MOCK=true` 时使用 **`MockJuniperClient`**，无需白名单网络。
 
-Currently, two official plugins are available:
+## 快速开始
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. 按仓库根目录说明启动 **Postgres** 并做好 **DB 迁移**与（建议）**静态酒店数据同步**。  
+2. 配置根目录 `.env`：`API_KEYS` 含 `test-api-key-1`，并配置 **LLM** API Key。  
+3. 启动后端：`uvicorn juniper_ai.app.main:app --reload --host 0.0.0.0 --port 8000`  
+4. 本目录：`npm ci && npm run dev`  
+5. 打开浏览器，选测试用户，开始对话。
 
-## React Compiler
+详细步骤、验证命令与排障见 **[IM_DEV_CHECKLIST.md](./IM_DEV_CHECKLIST.md)**。
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 技术栈
 
-## Expanding the ESLint configuration
+React 18、TypeScript、Vite、Tailwind CSS v4（`@tailwindcss/vite`）。
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## 相关文件
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
-
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+| 路径 | 作用 |
+|------|------|
+| `src/api/client.ts` | `X-API-Key` / `X-External-User-Id`，会话与发消息 |
+| `vite.config.ts` | `/api` → `http://localhost:8000` |
+| `src/mock/*` | 离线状态机 + 假数据（可选；主流程已接真后端） |

@@ -21,7 +21,8 @@ class Settings(BaseSettings):
 
     # Auth
     jwt_secret_key: str = "dev-secret-key-change-in-production"
-    api_keys: str = "test-api-key"
+    # Comma-separated; first key must match imToolTest `src/api/client.ts` default.
+    api_keys: str = "test-api-key-1,test-api-key-2"
 
     # Rate Limiting
     rate_limit_user: int = 60
@@ -41,6 +42,43 @@ class Settings(BaseSettings):
     hotel_avail_batch_size: int = 25
     hotel_avail_batch_concurrency: int = 3
     hotel_avail_max_candidates: int = 200
+
+    # HotelAvail request advanced options — required by Juniper docs so that
+    # HotelInfo (name / address / category) and CancellationPolicy come back
+    # in the response, and so that @Context allows the supplier to route the
+    # request through the correct availability pool (multi-hotel search =
+    # FULLAVAIL, per-hotel detail = SINGLEAVAIL; see ``doc/juniper-hotel-api.md``
+    # §Context). ``juniper_avail_timeout_ms`` maps to
+    # ``AdvancedOptions/TimeOut`` — Juniper caps this at 8000 ms.
+    juniper_avail_context: str = "FULLAVAIL"
+    juniper_avail_show_hotel_info: bool = True
+    juniper_avail_show_cancellation_policies: bool = True
+    juniper_avail_show_only_available: bool = True
+    juniper_avail_timeout_ms: int = 8000
+
+    # HotelCheckAvail — docs recommend ``SINGLEAVAIL`` or ``VALUATION``
+    # on the ``@Context`` attribute of ``HotelCheckAvailRQ``. Empty disables.
+    juniper_check_avail_context: str = "SINGLEAVAIL"
+
+    # HotelBookingRules — docs recommend ``VALUATION``, ``BOOKING``, or
+    # ``PAYMENT`` on the ``@Context`` attribute of ``HotelBookingRulesRQ``
+    # (see ``uploads/hotel-api-0.md`` §HotelBookingRules Request, line 2495).
+    # This helps Juniper route the call through the valuation pool rather
+    # than the availability one. Empty string disables the attribute.
+    juniper_booking_rules_context: str = "VALUATION"
+
+    # HotelBooking — ``@Context`` attribute on ``HotelBookingRQ``. Docs
+    # recommend ``BOOKING`` (or ``PAYMENT`` when the call kicks off a
+    # payment flow). Empty string disables the attribute.
+    juniper_booking_context: str = "BOOKING"
+
+    # HotelBooking price tolerance — fed into
+    # ``HotelBookingInfo/Price/PriceRange/@Maximum`` as a percentage above
+    # the total quoted by HotelBookingRules. 0.0 = strict (fail on any
+    # upward drift); 0.02 = accept up to +2%. Minimum is always 0 (downward
+    # drift can never fail the booking). Juniper rejects the booking if the
+    # server-side price is outside this window.
+    juniper_booking_price_tolerance_pct: float = 0.0
 
     # Conversations
     conversation_ttl_hours: int = 24

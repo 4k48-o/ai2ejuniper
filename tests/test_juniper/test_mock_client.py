@@ -26,7 +26,8 @@ async def test_hotel_avail_returns_results(client):
 @pytest.mark.asyncio
 async def test_hotel_avail_returns_all_for_any_zone(client):
     hotels = await client.hotel_avail("99999", "2026-04-15", "2026-04-18")
-    assert len(hotels) == 5  # mock returns all hotels regardless of zone
+    # Combined catalogue: IM UAT fixture (JP046300) + five Barcelona mocks.
+    assert len(hotels) == 6
 
 
 @pytest.mark.asyncio
@@ -39,6 +40,20 @@ async def test_hotel_avail_filters_by_hotel_codes(client):
     )
     codes = {h["hotel_code"] for h in hotels}
     assert codes == {"HOT001", "HOT003"}
+
+
+@pytest.mark.asyncio
+async def test_hotel_avail_im_fixture_jp046300(client):
+    """DB zone search often yields JP046300; mock must return availability for IM 联调."""
+    hotels = await client.hotel_avail(
+        hotel_codes=["jp046300"],
+        check_in="2026-04-15",
+        check_out="2026-04-18",
+    )
+    assert len(hotels) == 1
+    assert hotels[0]["hotel_code"] == "JP046300"
+    assert hotels[0]["rate_plan_code"] == "MOCK_RPC_IM_JP046300_SA"
+    assert hotels[0]["total_price"] == "291.52"
 
 
 @pytest.mark.asyncio

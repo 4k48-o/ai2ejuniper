@@ -885,7 +885,7 @@ async def test_persist_booking_stores_booking_details():
     db.add = MagicMock(side_effect=capture_add)
     db.flush = AsyncMock()
 
-    with patch("juniper_ai.app.api.routes.conversations.dispatch_event", new_callable=AsyncMock):
+    with patch("juniper_ai.app.services.booking_persist.dispatch_event", new_callable=AsyncMock):
         await _persist_booking(db, user_id, conv_id, booking_data)
 
     assert len(captured) == 1
@@ -931,7 +931,7 @@ async def test_persist_booking_idempotency_key_format():
     db.add = MagicMock(side_effect=lambda o: captured.append(o))
     db.flush = AsyncMock()
 
-    with patch("juniper_ai.app.api.routes.conversations.dispatch_event", new_callable=AsyncMock):
+    with patch("juniper_ai.app.services.booking_persist.dispatch_event", new_callable=AsyncMock):
         await _persist_booking(db, user_id, conv_id, booking_data)
 
     row = captured[0]
@@ -966,7 +966,7 @@ async def test_persist_booking_duplicate_same_conversation_and_juniper_id_skips_
     db.add = MagicMock()
     db.flush = AsyncMock()
 
-    with patch("juniper_ai.app.api.routes.conversations.dispatch_event", new_callable=AsyncMock):
+    with patch("juniper_ai.app.services.booking_persist.dispatch_event", new_callable=AsyncMock):
         await _persist_booking(db, user_id, conv_id, booking_data)
         await _persist_booking(db, user_id, conv_id, booking_data)
 
@@ -1004,8 +1004,8 @@ async def test_persist_booking_duplicate_logs_skipping():
     db.add = MagicMock()
     db.flush = AsyncMock()
 
-    with patch("juniper_ai.app.api.routes.conversations.dispatch_event", new_callable=AsyncMock), \
-         patch("juniper_ai.app.api.routes.conversations.logger") as log_mock:
+    with patch("juniper_ai.app.services.booking_persist.dispatch_event", new_callable=AsyncMock), \
+         patch("juniper_ai.app.services.booking_persist.logger") as log_mock:
         await _persist_booking(db, user_id, conv_id, booking_data)
         await _persist_booking(db, user_id, conv_id, booking_data)
 
@@ -1049,7 +1049,7 @@ async def test_persist_booking_dispatches_booking_confirmed_webhook():
     db.add = MagicMock(side_effect=capture_add)
     db.flush = AsyncMock()
 
-    with patch("juniper_ai.app.api.routes.conversations.dispatch_event", new_callable=AsyncMock) as mock_dispatch:
+    with patch("juniper_ai.app.services.booking_persist.dispatch_event", new_callable=AsyncMock) as mock_dispatch:
         await _persist_booking(db, user_id, conv_id, booking_data)
 
     mock_dispatch.assert_awaited_once()
@@ -1090,10 +1090,10 @@ async def test_persist_booking_dispatch_failure_does_not_raise():
     db.flush = AsyncMock()
 
     with patch(
-        "juniper_ai.app.api.routes.conversations.dispatch_event",
+        "juniper_ai.app.services.booking_persist.dispatch_event",
         new_callable=AsyncMock,
         side_effect=RuntimeError("webhook delivery failed"),
-    ), patch("juniper_ai.app.api.routes.conversations.logger") as log_mock:
+    ), patch("juniper_ai.app.services.booking_persist.logger") as log_mock:
         await _persist_booking(db, user_id, conv_id, booking_data)
 
     log_mock.error.assert_called_once()

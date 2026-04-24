@@ -29,7 +29,7 @@ from juniper_ai.app.juniper.exceptions import (
     RoomUnavailableError,
     SOAPTimeoutError,
 )
-from juniper_ai.app.juniper.mock_client import get_juniper_client
+from juniper_ai.app.juniper.mock_client import get_juniper_client, mock_catalog_hotel_codes_upper
 from juniper_ai.app.juniper.static_data import (
     get_zone_candidates,
     get_zone_code,
@@ -144,7 +144,43 @@ async def search_hotels(
             country_of_residence=country_of_residence,
         )
         from juniper_ai.app.juniper.serializers import hotels_to_llm_summary
+
         elapsed_ms = int((time.monotonic() - t_start) * 1000)
+        if not hotels:
+            logger.warning(
+                "search_hotels ZERO_RESULTS: destination=%r zone.jpdcode=%s "
+                "cached_jpcodes=%d star=%s max_price=%s board=%s juniper_use_mock=%s",
+                destination, zone["jpdcode"], len(jp_codes),
+                star_rating, max_price, board_type, settings.juniper_use_mock,
+            )
+            if settings.juniper_use_mock:
+                mock_codes = mock_catalog_hotel_codes_upper()
+                overlap = [c for c in jp_codes if str(c).strip().upper() in mock_codes]
+                listed = ", ".join(sorted(mock_codes))
+                if not overlap:
+                    return (
+                        "[Mock Juniper] Your local hotel cache returned "
+                        f"{len(jp_codes)} JP code(s) for **{zone['name']}**, but **none** of them are in the "
+                        "mock supplier catalogue, so availability is empty — this is **not** a network outage "
+                        "or SOAP failure. "
+                        f"Mock hotel codes are: {listed}. "
+                        "For Palma offline tests, run static data sync so **JP046300** is present in "
+                        "`hotel_cache` for this zone. "
+                        "Also avoid filters that exclude the mock row (Palma mock is **Room Only**, ~291 EUR)."
+                    )
+                return (
+                    "[Mock Juniper] Some cached JP codes match the mock catalogue "
+                    f"({', '.join(overlap[:5])}{'…' if len(overlap) > 5 else ''}), but **all** rows were "
+                    "removed by your search filters "
+                    f"(star_rating={star_rating}, max_price={max_price}, board_type={board_type!r}). "
+                    "Retry without board/star/price filters, or use **Room Only** for JP046300."
+                )
+            return (
+                f"No hotels found in {zone['name']} for {check_in} to {check_out} "
+                "(the supplier returned no bookable options for the cached hotel codes in this zone). "
+                "Try different dates, a nearby area, or relax filters."
+            )
+
         logger.info(
             "search_hotels OK: destination=%r zone.jpdcode=%s jpcodes=%d "
             "dates=%s..%s results=%d elapsed=%dms",

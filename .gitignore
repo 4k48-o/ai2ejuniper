@@ -17,5 +17,8 @@ htmlcov/
 *.db
 .gstack/
 
+# 沙箱 SOAP XML dump（含真实供应商响应，不进版本库）
+logs/
+
 # 本地文档，不纳入版本库（避免误提交敏感或未审定内容）
 doc/

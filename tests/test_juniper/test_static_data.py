@@ -184,6 +184,50 @@ async def test_get_zone_code_prefers_city_over_region():
     assert result["area_type"] == "CTY"
 
 
+@pytest.mark.asyncio
+async def test_get_zone_code_palma_alias_prefers_palma_de_mallorca():
+    """Bare 'Palma' must not bind to unrelated homonym CTY (e.g. Italy); use Mallorca."""
+    mallorca = MagicMock()
+    mallorca.jpdcode = "JPD054557"
+    mallorca.code = "15011"
+    mallorca.name = "Palma de Mallorca"
+    mallorca.area_type = "CTY"
+
+    mock_db = AsyncMock()
+    res = MagicMock()
+    res.scalar_one_or_none.return_value = mallorca
+    mock_db.execute = AsyncMock(return_value=res)
+
+    result = await get_zone_code(mock_db, "Palma")
+
+    assert result is not None
+    assert result["jpdcode"] == "JPD054557"
+    assert result["code"] == "15011"
+    mock_db.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_get_zone_code_palma_alias_falls_back_when_mallorca_missing():
+    """If Palma de Mallorca is absent from zones, fall back to exact 'Palma'."""
+    none_alias = MagicMock()
+    none_alias.scalar_one_or_none.return_value = None
+    other = MagicMock()
+    other.jpdcode = "JPD059779"
+    other.code = "19864"
+    other.name = "Palma"
+    other.area_type = "CTY"
+    exact = MagicMock()
+    exact.scalar_one_or_none.return_value = other
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(side_effect=[none_alias, exact])
+
+    result = await get_zone_code(mock_db, "Palma")
+
+    assert result is not None
+    assert result["jpdcode"] == "JPD059779"
+
+
 # ---------------------------------------------------------------------------
 # get_zone_candidates
 # ---------------------------------------------------------------------------
@@ -244,7 +288,7 @@ async def test_mock_client_hotel_portfolio():
     assert "hotels" in result
     assert "next_token" in result
     assert "total_records" in result
-    assert len(result["hotels"]) == 5
+    assert len(result["hotels"]) == 6  # IM fixture JP046300 + five Barcelona mocks
     assert all("jp_code" in h for h in result["hotels"])
 
 
